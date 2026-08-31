@@ -26,6 +26,7 @@ application, editor and terminal settings, and two scheduled maintenance jobs.
 | `Brewfile` | The application list is mine. Remove what you do not want. |
 | `bin/mac-update` | `SKIP_CASKS` — casks to hold back, e.g. a toolchain pinned by your CI. |
 | `bin/mac-cleanup` | `PROJECTS_DIR` if your checkouts do not live in `~/Projects`. |
+| `bin/mac-*` | `BATTERY_MIN` — battery percentage above which the jobs may run unplugged (65). |
 | `launchd/*.plist` | The hours the jobs run (12:00 and 13:00 by default). |
 
 ## Install
@@ -77,8 +78,13 @@ dotfiles/
 ## Maintenance jobs
 
 Both run daily from launchd but gate themselves: real work happens about once a
-week, only on AC power, and never while a build or emulator is running. A missed
-slot costs a day, not the week. Logs land in `~/Library/Logs/dotfiles/`.
+week, only on mains power or a battery above 65%, and never while a build or
+emulator is running. A missed slot costs a day, not the week. Logs land in
+`~/Library/Logs/dotfiles/`.
+
+```bash
+BATTERY_MIN=80 mac-update      # raise the bar for one run
+```
 
 ```bash
 mac-update --dry-run     # show what would be upgraded

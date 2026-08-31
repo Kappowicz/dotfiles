@@ -2,8 +2,8 @@
 # Weekly unattended updates via topgrade.
 #
 # launchd fires this daily; the script itself gates so the real work happens
-# about once a week, and only on AC power. A missed slot (asleep, on battery)
-# costs a day, not the whole cycle.
+# about once a week, and only on mains power or a battery above 65%.
+# A missed slot (asleep, low battery) costs a day, not the whole cycle.
 #
 #   mac-update              # normal run, with gates
 #   mac-update --force      # skip the gates
@@ -21,6 +21,17 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOM
 # from what CI checks. Upgrade those deliberately: brew upgrade --cask <name>
 SKIP_CASKS="${SKIP_CASKS:-}"
 
+# Runs on AC, or on battery above BATTERY_MIN percent. The point of the gate is
+# not to spend a long unplugged session on background work; a nearly full
+# battery is no reason to skip.
+BATTERY_MIN="${BATTERY_MIN:-65}"
+
+power_ok() {
+  pmset -g ps | grep -q 'AC Power' && return 0
+  BATTERY_PCT=$(pmset -g batt | grep -Eo '[0-9]{1,3}%' | head -1 | tr -d '%')
+  [ -n "$BATTERY_PCT" ] && [ "$BATTERY_PCT" -gt "$BATTERY_MIN" ]
+}
+
 STAMP="$HOME/.local/state/mac-update.last"
 INTERVAL=$((6 * 86400 + 43200))   # 6.5 days, leaves room for daily jitter
 
@@ -37,8 +48,10 @@ done
 mkdir -p "$(dirname "$STAMP")"
 
 if [ "$FORCE" -eq 0 ] && [ "$DRY" -eq 0 ]; then
-  if ! pmset -g ps | grep -q 'AC Power'; then
-    echo "On battery — skipping, will retry tomorrow."; exit 0
+  if ! power_ok; then
+    printf 'On battery at %s%% (need >%s%%) — skipping, will retry tomorrow.\n' \
+      "${BATTERY_PCT:-?}" "$BATTERY_MIN"
+    exit 0
   fi
   if [ -f "$STAMP" ]; then
     elapsed=$(( $(date +%s) - $(stat -f %m "$STAMP") ))

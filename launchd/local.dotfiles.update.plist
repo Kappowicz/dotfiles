@@ -6,8 +6,9 @@
   <string>local.dotfiles.update</string>
 
   <!-- Weekly updates. Fires daily, but the script itself only does the real work
-       once a week and only on AC power, so a laptop that was asleep or on
-       battery at this hour loses a day rather than the whole week.
+       once a week, and only on mains power or a battery above 65%, so a laptop
+       that was asleep or nearly flat at this hour loses a day rather than the
+       whole week.
        __HOME__ is substituted by install.sh. -->
   <key>StartCalendarInterval</key>
   <dict>
