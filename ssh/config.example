@@ -1,0 +1,16 @@
+# Copy to ~/.ssh/config and adjust. Not tracked: it describes your network.
+#
+# AddKeysToAgent + UseKeychain mean you type the key passphrase once and macOS
+# keeps it in the Keychain across reboots. Without them every non-interactive
+# ssh (scripts, backups) fails with "Permission denied" even though the key is
+# fine — the server accepts it, there is just nothing to sign with.
+
+Host myserver
+    HostName 192.168.1.10
+    User youruser
+
+Host *
+    AddKeysToAgent yes
+    UseKeychain yes
+    IdentityFile ~/.ssh/id_ed25519
+    ServerAliveInterval 30

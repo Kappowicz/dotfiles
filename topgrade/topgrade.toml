@@ -1,0 +1,19 @@
+# topgrade configuration. Full reference:
+# https://github.com/topgrade-rs/topgrade/blob/main/config.example.toml
+#
+# The scheduled run (bin/mac-update) passes its own --disable flags on top of
+# this, because it needs a stricter set than an interactive run does.
+
+[misc]
+# Steps that want sudo, a reboot, or would pull your repositories unattended.
+disable = ["system", "firmware", "restarts", "git_repos"]
+
+# Show why a step was skipped instead of silently dropping it.
+show_skipped = true
+
+# Only bother me when something actually failed.
+notify_end = "on_failure"
+
+[brew]
+# Remove formulae that are no longer depended on after upgrading.
+autoremove = true

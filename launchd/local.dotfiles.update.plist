@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.dotfiles.update</string>
+
+  <!-- Weekly updates. Fires daily, but the script itself only does the real work
+       once a week and only on AC power, so a laptop that was asleep or on
+       battery at this hour loses a day rather than the whole week.
+       __HOME__ is substituted by install.sh. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>13</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/bin/mac-update</string>
+  </array>
+
+  <key>RunAtLoad</key>          <false/>
+  <key>ProcessType</key>        <string>Background</string>
+  <key>LowPriorityIO</key>      <true/>
+  <key>Nice</key>               <integer>10</integer>
+  <key>StandardOutPath</key>    <string>__HOME__/Library/Logs/dotfiles/update.log</string>
+  <key>StandardErrorPath</key>  <string>__HOME__/Library/Logs/dotfiles/update.log</string>
+</dict>
+</plist>

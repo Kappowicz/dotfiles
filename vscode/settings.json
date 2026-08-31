@@ -1,0 +1,15 @@
+{
+    "workbench.colorTheme": "Default High Contrast",
+    "[dart]": {
+        "editor.formatOnSave": true,
+        "editor.formatOnType": true,
+        "editor.rulers": [
+            80
+        ],
+        "editor.selectionHighlight": false,
+        "editor.tabCompletion": "onlySnippets",
+        "editor.wordBasedSuggestions": "off"
+    },
+    "dart.debugExternalPackageLibraries": false,
+    "dart.debugSdkLibraries": false
+}

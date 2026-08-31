@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Weekly unattended updates via topgrade.
+#
+# launchd fires this daily; the script itself gates so the real work happens
+# about once a week, and only on AC power. A missed slot (asleep, on battery)
+# costs a day, not the whole cycle.
+#
+#   mac-update              # normal run, with gates
+#   mac-update --force      # skip the gates
+#   mac-update --dry-run    # print what would happen, change nothing
+#
+# Steps left disabled on purpose:
+#   system, firmware, restarts  — want sudo or a reboot, not for background use
+#   git_repos                   — would pull your repositories unattended
+set -uo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin"
+
+# --- settings ---------------------------------------------------------------
+# Casks to hold back, space separated. Useful when a toolchain version is
+# pinned by a project's CI and a silent bump would make local builds diverge
+# from what CI checks. Upgrade those deliberately: brew upgrade --cask <name>
+SKIP_CASKS="${SKIP_CASKS:-}"
+
+STAMP="$HOME/.local/state/mac-update.last"
+INTERVAL=$((6 * 86400 + 43200))   # 6.5 days, leaves room for daily jitter
+
+DRY=0
+FORCE=0
+for a in "$@"; do
+  case "$a" in
+    --dry-run|-n) DRY=1 ;;
+    --force|-f)   FORCE=1 ;;
+    *) printf 'Unknown argument: %s\n' "$a" >&2; exit 2 ;;
+  esac
+done
+
+mkdir -p "$(dirname "$STAMP")"
+
+if [ "$FORCE" -eq 0 ] && [ "$DRY" -eq 0 ]; then
+  if ! pmset -g ps | grep -q 'AC Power'; then
+    echo "On battery — skipping, will retry tomorrow."; exit 0
+  fi
+  if [ -f "$STAMP" ]; then
+    elapsed=$(( $(date +%s) - $(stat -f %m "$STAMP") ))
+    if [ "$elapsed" -lt "$INTERVAL" ]; then
+      printf 'Last update %d days ago — too soon.\n' $((elapsed / 86400)); exit 0
+    fi
+  fi
+fi
+
+# Updating a toolchain mid-build ends badly. Harmless under --dry-run, since
+# nothing changes there anyway.
+if [ "$DRY" -eq 0 ] \
+   && pgrep -f 'flutter_tools.snapshot|flutter_tester|GradleDaemon' >/dev/null 2>&1; then
+  echo "Build in progress — not updating. Back tomorrow."; exit 0
+fi
+
+# --- casks, one at a time ---------------------------------------------------
+printf '\n\033[1m> Applications (brew --cask)\033[0m\n'
+brew list --cask 2>/dev/null | while IFS= read -r c; do
+  case " $SKIP_CASKS " in *" $c "*) printf '\033[33m  - %s (pinned)\033[0m\n' "$c"; continue ;; esac
+  if [ "$DRY" -eq 1 ]; then
+    printf '    brew upgrade --cask %s\n' "$c"
+  else
+    # Individually, so one cask asking for a password cannot block the rest.
+    brew upgrade --cask "$c" >/dev/null 2>&1 \
+      && printf '\033[32m  + %s\033[0m\n' "$c" \
+      || printf '\033[33m  - %s (skipped)\033[0m\n' "$c"
+  fi
+done
+
+# --- everything else via topgrade -------------------------------------------
+printf '\n\033[1m> topgrade\033[0m\n'
+ARGS="--no-self-update --no-ask-retry --disable system firmware restarts git_repos brew_cask"
+if [ "$DRY" -eq 1 ]; then
+  # shellcheck disable=SC2086
+  topgrade --dry-run $ARGS
+else
+  # shellcheck disable=SC2086
+  topgrade --yes $ARGS
+  touch "$STAMP"
+fi

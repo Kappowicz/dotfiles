@@ -1,0 +1,9 @@
+# Copy to ~/.gitconfig.local and fill in. Never commit the real file.
+#
+# On GitHub, prefer the noreply address so your real one stays out of public
+# commit metadata: Settings -> Emails -> "Keep my email address private" gives
+# you an ID+username@users.noreply.github.com address. Tick "Block command
+# line pushes that expose my email" while you are there.
+[user]
+	name = Your Name
+	email = you@example.com

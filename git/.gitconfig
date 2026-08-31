@@ -1,0 +1,20 @@
+# Identity lives in ~/.gitconfig.local, which is not tracked here.
+# install.sh creates it from git/gitconfig.local.example on first run.
+[include]
+	path = ~/.gitconfig.local
+
+[init]
+	defaultBranch = main
+[push]
+	autoSetupRemote = true
+[pull]
+	rebase = true
+[core]
+	pager = delta
+	excludesfile = ~/.config/git/ignore
+[interactive]
+	diffFilter = delta --color-only
+[delta]
+	navigate = true
+[merge]
+	conflictstyle = zdiff3

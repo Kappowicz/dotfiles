@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# Weekly disk cleanup.
+#
+# launchd fires this daily; the script gates itself so the real work happens
+# about once a week, and only on AC power. A missed slot (asleep, on battery)
+# costs a day, not the whole cycle.
+#
+#   mac-cleanup              # normal run, with gates
+#   mac-cleanup --force      # skip the gates, run now
+#   mac-cleanup --dry-run    # only show what would be removed
+#
+# Written for bash 3.2 (the one in /bin/bash) — no mapfile, no associative
+# arrays.
+#
+# Deliberately not here: emulator userdata and Gradle transforms. Both are
+# large, both are painfully slow to rebuild. Commands for those at the bottom.
+set -uo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin"
+
+# --- settings ---------------------------------------------------------------
+PROJECTS_DIR="${PROJECTS_DIR:-$HOME/Projects}"   # where your checkouts live
+KEEP_BUILD_CONFIGS=8                             # Flutter build dirs to keep
+STALE_DAYS=30                                    # caches untouched this long
+
+STAMP="$HOME/.local/state/mac-cleanup.last"
+INTERVAL=$((6 * 86400 + 43200))   # 6.5 days, leaves room for daily jitter
+
+DRY=0
+FORCE=0
+for a in "$@"; do
+  case "$a" in
+    --dry-run|-n) DRY=1 ;;
+    --force|-f)   FORCE=1 ;;
+    *) printf 'Unknown argument: %s\n' "$a" >&2; exit 2 ;;
+  esac
+done
+
+mkdir -p "$(dirname "$STAMP")"
+
+b()  { printf '\n\033[1m> %s\033[0m\n' "$1"; }
+ok() { printf '\033[32m  + %s\033[0m\n' "$1"; }
+sk() { printf '\033[33m  - %s\033[0m\n' "$1"; }
+
+# --- gates ------------------------------------------------------------------
+if [ "$FORCE" -eq 0 ] && [ "$DRY" -eq 0 ]; then
+  if ! pmset -g ps | grep -q 'AC Power'; then
+    echo "On battery — skipping, will retry tomorrow."; exit 0
+  fi
+  if [ -f "$STAMP" ]; then
+    elapsed=$(( $(date +%s) - $(stat -f %m "$STAMP") ))
+    if [ "$elapsed" -lt "$INTERVAL" ]; then
+      printf 'Last cleanup %d days ago — too soon.\n' $((elapsed / 86400)); exit 0
+    fi
+  fi
+fi
+
+# A running build means the directories to remove are in use right now.
+# Harmless under --dry-run, since nothing disappears there anyway.
+if [ "$DRY" -eq 0 ] \
+   && pgrep -f 'flutter_tools.snapshot|flutter_tester|GradleDaemon|qemu-system' >/dev/null 2>&1; then
+  echo "Build or emulator running — touching nothing. Back tomorrow."; exit 0
+fi
+
+free_kb() { df -k / | awk 'NR==2 {print $4}'; }
+BEFORE=$(free_kb)
+
+drop() { # drop <path> — one at a time, so it can be counted and logged
+  if [ "$DRY" -eq 1 ]; then printf '    %s\n' "$1"; else rm -rf "$1"; fi
+}
+
+to_trash() { # safer than rm for things out of ~/Downloads
+  local target
+  target="$HOME/.Trash/$(basename "$1")"
+  [ -e "$target" ] && target="$target.$(date +%s)"
+  if [ "$DRY" -eq 1 ]; then printf '    %s -> Trash\n' "$1"; else mv "$1" "$target"; fi
+}
+
+# --- 1. Homebrew ------------------------------------------------------------
+b "Homebrew"
+if [ "$DRY" -eq 1 ]; then
+  brew cleanup --dry-run 2>&1 | tail -3
+else
+  brew cleanup -s --prune=30 >/dev/null 2>&1 && ok "cache cleared"
+fi
+
+# --- 2. Gradle --------------------------------------------------------------
+# The same rule Gradle's own cache eviction uses — except that one rarely runs,
+# because the daemon seldom exits cleanly.
+b "Gradle"
+n=0
+while IFS= read -r -d '' p; do drop "$p"; n=$((n + 1)); done < <(
+  find "$HOME/.gradle/caches/modules-2" -type f -atime +$STALE_DAYS -print0 2>/dev/null
+)
+while IFS= read -r -d '' p; do drop "$p"; n=$((n + 1)); done < <(
+  find "$HOME/.gradle/caches"/*/transforms -mindepth 1 -maxdepth 1 -type d -atime +$STALE_DAYS -print0 2>/dev/null
+)
+while IFS= read -r -d '' p; do drop "$p"; n=$((n + 1)); done < <(
+  find "$HOME/.gradle/daemon" -type f -name '*.log' -mtime +$STALE_DAYS -print0 2>/dev/null
+)
+[ "$n" -gt 0 ] && ok "unused entries (>$STALE_DAYS days): $n" || sk "nothing older than $STALE_DAYS days"
+
+# --- 3. Flutter: stale build configurations ---------------------------------
+# .dart_tool/flutter_build keeps one directory per build configuration and
+# never removes any; they pile up at ~100 MB each. The most recent few cover
+# real day-to-day use, the rest rebuild themselves when needed.
+b "Flutter build configurations"
+n=0
+while IFS= read -r -d '' pubspec; do
+  fb="$(dirname "$pubspec")/.dart_tool/flutter_build"
+  [ -d "$fb" ] || continue
+  while IFS= read -r p; do drop "$p"; n=$((n + 1)); done < <(
+    ls -dt "$fb"/*/ 2>/dev/null | tail -n +$((KEEP_BUILD_CONFIGS + 1))
+  )
+done < <(find "$PROJECTS_DIR" -maxdepth 2 -name pubspec.yaml -print0 2>/dev/null)
+[ "$n" -gt 0 ] && ok "directories removed: $n" || sk "nothing to remove"
+
+# --- 4. DevTools dumps in Downloads -----------------------------------------
+b "DevTools dumps"
+n=0
+while IFS= read -r -d '' p; do to_trash "$p"; n=$((n + 1)); done < <(
+  find "$HOME/Downloads" -maxdepth 1 -name 'dart_devtools_*' -mtime +7 -print0 2>/dev/null
+)
+[ "$n" -gt 0 ] && ok "moved to Trash: $n" || sk "none older than 7 days"
+
+# --- 5. Emulator snapshots --------------------------------------------------
+# Costs one cold boot (~a minute) next time the emulator starts. That is all.
+b "Emulator snapshots"
+n=0
+while IFS= read -r -d '' p; do drop "$p"; n=$((n + 1)); done < <(
+  find "$HOME/.android/avd" -mindepth 3 -maxdepth 3 -type d -path '*/snapshots/*' -mtime +$STALE_DAYS -print0 2>/dev/null
+)
+[ "$n" -gt 0 ] && ok "snapshots (>$STALE_DAYS days): $n" || sk "none older than $STALE_DAYS days"
+
+# --- 6. Updater and pip caches ----------------------------------------------
+b "Updater caches"
+if pgrep -f Antigravity >/dev/null 2>&1; then
+  sk "Antigravity is running — leaving its cache alone"
+else
+  drop "$HOME/Library/Caches/com.google.antigravity.ShipIt"
+  drop "$HOME/Library/Caches/antigravity-updater"
+  ok "Antigravity installer leftovers"
+fi
+if [ "$DRY" -eq 0 ] && command -v pip3 >/dev/null 2>&1; then
+  pip3 cache purge >/dev/null 2>&1 && ok "pip cache"
+fi
+
+# --- summary ----------------------------------------------------------------
+AFTER=$(free_kb)
+printf '\n'
+if [ "$DRY" -eq 1 ]; then
+  printf '\033[1mDry run — nothing removed.\033[0m\n'
+else
+  touch "$STAMP"
+  awk -v a="$BEFORE" -v b="$AFTER" 'BEGIN {
+    printf "\033[1mReclaimed: %.1f GB\033[0m (free: %.1f GB)\n",
+           (b - a) / 1048576, b / 1048576
+  }'
+fi
+
+# By hand, when you are genuinely out of space — not scheduled, because these
+# hurt:
+#   rm -rf ~/.gradle/caches/*/transforms          # GBs, slow next Android build
+#   rm -f  ~/.android/avd/*.avd/userdata-*.qcow2  # GBs, wipes emulator state
+#   (cd <project> && flutter clean)               # GBs, forces a full rebuild
