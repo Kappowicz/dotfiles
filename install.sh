@@ -28,7 +28,7 @@ done
 echo "Setting up macOS from ${DOTFILES_DIR}"
 echo
 echo "This will replace the following with symlinks into this repo:"
-echo "  ~/.zshrc  ~/.zprofile  ~/.gitconfig  ~/.config/{git/ignore,ghostty,linearmouse,topgrade.toml}"
+echo "  ~/.zshrc  ~/.zprofile  ~/.config/{git/ignore,ghostty,linearmouse,topgrade.toml}"
 echo "  ~/.ssh/config  ~/.local/bin/mac-{update,cleanup}  VS Code settings.json"
 echo "It also installs Homebrew + everything in Brewfile, oh-my-zsh, and two"
 echo "launchd agents that update and clean up weekly."
@@ -92,9 +92,16 @@ mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
 # ------------------------------------------------------------------------------
 # 4. Machine-specific files, generated from templates (never tracked in git)
 # ------------------------------------------------------------------------------
-if [ ! -f "$HOME/.gitconfig.local" ]; then
-    cp "${DOTFILES_DIR}/git/gitconfig.local.example" "$HOME/.gitconfig.local"
-    echo "==> Created ~/.gitconfig.local — EDIT IT, it still says 'Your Name'."
+# ~/.gitconfig is a real file, not a symlink: `git config --global` writes to
+# that path, and a symlink would point those writes straight into the repo.
+if [ ! -f "$HOME/.gitconfig" ] || [ -L "$HOME/.gitconfig" ]; then
+    if [ -L "$HOME/.gitconfig" ]; then
+        echo "   replacing the old ~/.gitconfig symlink with a real file"
+        mv "$HOME/.gitconfig" "$HOME/.gitconfig${BACKUP_SUFFIX}"
+    fi
+    sed "s|__DOTFILES__|${DOTFILES_DIR}|g" \
+        "${DOTFILES_DIR}/git/gitconfig.example" > "$HOME/.gitconfig"
+    echo "==> Created ~/.gitconfig — EDIT IT, it still says 'Your Name'."
     NEEDS_IDENTITY=1
 fi
 if [ ! -f "${DOTFILES_DIR}/ssh/config" ]; then
@@ -127,7 +134,6 @@ link_file() {
 echo "==> Linking configuration files..."
 link_file "${DOTFILES_DIR}/zsh/.zshrc"                    "$HOME/.zshrc"
 link_file "${DOTFILES_DIR}/zsh/.zprofile"                 "$HOME/.zprofile"
-link_file "${DOTFILES_DIR}/git/.gitconfig"                "$HOME/.gitconfig"
 link_file "${DOTFILES_DIR}/git/ignore"                    "$HOME/.config/git/ignore"
 link_file "${DOTFILES_DIR}/ghostty/config"                "$HOME/.config/ghostty/config"
 link_file "${DOTFILES_DIR}/linearmouse/linearmouse.json"  "$HOME/.config/linearmouse/linearmouse.json"
@@ -165,5 +171,5 @@ echo
 echo "Done. Restart your terminal, or run: exec zsh"
 if [ "${NEEDS_IDENTITY:-0}" -eq 1 ]; then
     echo
-    echo "!! Before your first commit, set your name and email in ~/.gitconfig.local"
+    echo "!! Before your first commit, set your name and email in ~/.gitconfig"
 fi

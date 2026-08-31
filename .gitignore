@@ -4,8 +4,8 @@
 *.tmp
 
 # Machine-specific files, generated from the .example templates by install.sh
-git/.gitconfig.local
 ssh/config
+# ~/.gitconfig itself lives in $HOME, never in this repo — see git/gitconfig.example
 
 # Security / secrets safety guard
 id_rsa*

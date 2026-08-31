@@ -1,7 +1,10 @@
-# Identity lives in ~/.gitconfig.local, which is not tracked here.
-# install.sh creates it from git/gitconfig.local.example on first run.
-[include]
-	path = ~/.gitconfig.local
+# Shared git settings. This file is INCLUDED by ~/.gitconfig, never symlinked
+# to it — see git/gitconfig.example and install.sh.
+#
+# The distinction matters: `git config --global ...` writes to ~/.gitconfig.
+# If that path were a symlink into this repository, any tool that sets a global
+# option (an IDE, a helper, another shell session) would silently modify a
+# tracked file, and your name and email would ride along on the next commit.
 
 [init]
 	defaultBranch = main

@@ -21,7 +21,7 @@ application, editor and terminal settings, and two scheduled maintenance jobs.
 
 | Where | What to change |
 | --- | --- |
-| `git/gitconfig.local.example` | Your name and email. Copied to `~/.gitconfig.local` on first run; that file is never tracked. |
+| `git/gitconfig.example` | Your name and email. Becomes `~/.gitconfig` on first run — a real file, never tracked. |
 | `ssh/config.example` | Your own hosts. Copied to `ssh/config` on first run, which is gitignored. |
 | `Brewfile` | The application list is mine. Remove what you do not want. |
 | `bin/mac-update` | `SKIP_CASKS` — casks to hold back, e.g. a toolchain pinned by your CI. |
@@ -42,7 +42,7 @@ The script asks for confirmation, then:
 1. Installs **Homebrew** if missing, and everything in the `Brewfile`.
 2. Installs **oh-my-zsh** plus `zsh-autosuggestions` and `zsh-syntax-highlighting`,
    which `.zshrc` expects.
-3. Creates `~/.gitconfig.local` and `ssh/config` from their `.example` templates.
+3. Creates `~/.gitconfig` and `ssh/config` from their `.example` templates.
 4. Symlinks the configs into place, backing up anything already there as
    `<file>.backup-<timestamp>`.
 5. Installs two launchd agents, resolving `__HOME__` to the current user.
@@ -61,8 +61,8 @@ dotfiles/
 │   ├── .zshrc                # Aliases, history, fzf, zoxide, extract()
 │   └── .zprofile             # PATH and Homebrew init
 ├── git/
-│   ├── .gitconfig            # Settings only; identity is included from ~/.gitconfig.local
-│   ├── gitconfig.local.example
+│   ├── .gitconfig            # Shared settings, included by ~/.gitconfig
+│   ├── gitconfig.example     # Template for ~/.gitconfig (identity lives there)
 │   └── ignore                # Global gitignore
 ├── ghostty/config            # Terminal (Citruszest theme)
 ├── linearmouse/              # Pointer acceleration and reversed scrolling
@@ -109,9 +109,14 @@ cd ~/dotfiles && git add . && git commit -m "Update configs" && git push
 ## Security
 
 `.gitignore` blocks SSH private keys, `*.pem`, `*.key`, tokens and `.env*`.
-Machine-specific files — `~/.gitconfig.local` and `ssh/config` — are generated
-from `.example` templates and never tracked, so no identity, host or address
-from a real machine ends up in this repository.
+Machine-specific files — `~/.gitconfig` and `ssh/config` — are generated from
+`.example` templates and never tracked, so no identity, host or address from a
+real machine ends up in this repository.
+
+`~/.gitconfig` is deliberately a real file that *includes* `git/.gitconfig`,
+rather than a symlink to it. `git config --global ...` writes to that path, so a
+symlink would let any tool that sets a global option quietly edit a tracked file
+and put your name and email into the next commit.
 
 On GitHub, turn on *Settings → Emails → Keep my email address private* and
 *Block command line pushes that expose my email* before your first commit.
