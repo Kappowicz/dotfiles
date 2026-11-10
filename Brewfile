@@ -36,8 +36,12 @@ brew "nmap"
 brew "node"
 # Vulnerability scanner which uses the OSV database
 brew "osv-scanner"
+# PDF rendering library (based on the xpdf-3.0 code base)
+brew "poppler"
 # Monitor data's progress through a pipe
 brew "pv"
+# Generic machine emulator and virtualizer
+brew "qemu"
 # Rsync for cloud storage
 brew "rclone"
 # Search tool like grep and The Silver Searcher
@@ -48,8 +52,8 @@ brew "rsync"
 brew "semgrep"
 # Static analysis and lint tool, for (ba)sh scripts
 brew "shellcheck"
-# Simplified and community-driven man pages
-brew "tldr"
+# Official tldr client written in Rust
+brew "tlrc"
 # Upgrade all the things
 brew "topgrade"
 # Display directories as trees (with optional color/HTML output)
@@ -58,24 +62,16 @@ brew "tree"
 brew "watch"
 # Shell extension to navigate your filesystem faster
 brew "zoxide"
-# CLI tool for controlling keyboard backlight brightness on Mac
-brew "rakalex/mac-brightnessctl/mac-brightnessctl"
 # Command-line tools for building and debugging Android apps
 cask "android-commandlinetools"
 # Tools for building Android applications
 cask "android-studio"
-# Agent orchestration platform
-cask "antigravity"
 # Not so boring notch That Rocks 🎸🎶 
 cask "theboredteam/boring-notch/boring-notch", trusted: true
 # Web browser focusing on privacy
 cask "brave-browser"
 # Utility that prevents the system from going to sleep
 cask "caffeine"
-# Anthropic's official Claude AI desktop app
-cask "claude"
-# Write, edit, and chat about your code with AI
-cask "cursor"
 # Voice and text chat software
 cask "discord"
 # UI toolkit for building applications for mobile, web and desktop
@@ -88,8 +84,6 @@ cask "google-drive"
 cask "linearmouse"
 # Open-source cross-platform alternative to AirDrop
 cask "localsend"
-# Cloud gaming platform
-cask "nvidia-geforce-now"
 # VPN client focusing on security
 cask "protonvpn"
 # Control your tools with a few keystrokes
@@ -106,3 +100,21 @@ cask "visual-studio-code"
 cask "vlc"
 vscode "dart-code.dart-code"
 vscode "dart-code.flutter"
+
+# Additional software installed on this Mac
+brew "jq"
+brew "python@3.15"
+brew "sevenzip"
+brew "lame"
+brew "qrencode"
+brew "ollama", restart_service: true
+brew "mas"
+cask "android-file-transfer"
+cask "dockdoor"
+cask "google-chrome"
+cask "microsoft-teams"
+cask "openmtp"
+cask "rectangle"
+cask "surfshark"
+cask "tailscale-app"
+cask "ubersicht"

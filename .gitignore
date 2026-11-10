@@ -16,3 +16,12 @@ id_ed25519*
 *.token
 .env*
 .claude.json
+
+# App exports and recovery artifacts may contain credentials or private data.
+exports/private/
+*.rayconfig
+*.age
+*.tar
+*.tar.gz
+__pycache__/
+*.pyc
