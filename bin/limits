@@ -138,85 +138,10 @@ def shorten_account(account):
 # -------------------------------------------------------------
 # 1. Claude Fetcher
 # -------------------------------------------------------------
-CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-CLAUDE_DEFAULT_SCOPES = [
-    "user:profile",
-    "user:inference",
-    "user:sessions:claude_code",
-    "user:mcp_servers",
-    "user:file_upload",
-]
-
-def refresh_claude_token(creds, env):
-    oauth = creds.get("claudeAiOauth") if isinstance(creds.get("claudeAiOauth"), dict) else creds
-    refresh_token = oauth.get("refreshToken")
-    if not refresh_token:
-        return None
-    scopes = oauth.get("scopes") or CLAUDE_DEFAULT_SCOPES
-    scope_str = " ".join(scopes) if isinstance(scopes, list) else str(scopes)
-    client_id = oauth.get("clientId") or CLAUDE_OAUTH_CLIENT_ID
-    try:
-        payload = json.dumps({
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": client_id,
-            "scope": scope_str,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            "https://platform.claude.com/v1/oauth/token",
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "Claude-Code/1.0.0",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            new_tok = json.loads(resp.read().decode("utf-8"))
-        new_access = new_tok.get("access_token")
-        if not new_access:
-            return None
-        now_ms = int(time.time() * 1000)
-        oauth["accessToken"] = new_access
-        if new_tok.get("refresh_token"):
-            oauth["refreshToken"] = new_tok["refresh_token"]
-        if isinstance(new_tok.get("expires_in"), (int, float)):
-            oauth["expiresAt"] = now_ms + int(new_tok["expires_in"] * 1000)
-        if isinstance(new_tok.get("refresh_token_expires_in"), (int, float)):
-            oauth["refreshTokenExpiresAt"] = now_ms + int(new_tok["refresh_token_expires_in"] * 1000)
-        if isinstance(new_tok.get("scope"), str):
-            oauth["scopes"] = [s for s in new_tok["scope"].split(" ") if s]
-        if "claudeAiOauth" in creds:
-            creds["claudeAiOauth"] = oauth
-        else:
-            creds = oauth
-
-        try:
-            acct = os.environ.get("USER") or os.path.basename(REAL_HOME)
-            hex_payload = json.dumps(creds, separators=(",", ":")).encode("utf-8").hex()
-            sec_cmd = f'add-generic-password -U -a "{acct}" -s "Claude Code-credentials" -X "{hex_payload}"\n'
-            if len(sec_cmd) <= 4000:
-                subprocess.run(
-                    ["security", "-i"],
-                    input=sec_cmd,
-                    text=True,
-                    capture_output=True,
-                    timeout=4,
-                    env=env,
-                )
-            else:
-                subprocess.run(
-                    ["security", "add-generic-password", "-U", "-a", acct, "-s", "Claude Code-credentials", "-X", hex_payload],
-                    capture_output=True,
-                    timeout=4,
-                    env=env,
-                )
-        except Exception:
-            pass
-        return new_access
-    except Exception:
-        return None
-
+# Tokenów tylko używamy, nigdy ich nie odświeżamy ani nie zapisujemy. Refresh
+# token bywa jednorazowy: gdyby ten skrypt go wymienił, a zapis się nie udał
+# albo ścigał z działającym CLI, właściciel tokena (Claude Code, Codex) zostałby
+# wylogowany. Wygasły token odświeża samo CLI przy następnym uruchomieniu.
 def sanitize_expired_claude_windows(usage):
     """Jeśli w cache'u minął czas resets_at danego okna, wyzeruj jego zużycie."""
     if not isinstance(usage, dict):
@@ -262,11 +187,8 @@ def fetch_claude_quota(cache_ttl=0):
         creds = json.loads(p.stdout.strip())
         oauth = creds.get("claudeAiOauth") or creds
         token = oauth.get("accessToken")
-        expires_at = oauth.get("expiresAt")
-        if (not token or (isinstance(expires_at, (int, float)) and now * 1000 >= expires_at - 30000)) and oauth.get("refreshToken"):
-            refreshed = refresh_claude_token(creds, env)
-            if refreshed:
-                token = refreshed
+        if not token:
+            raise ValueError("brak accessToken")
     except Exception as e:
         # Fallback to ~/.claude.json
         claude_json_path = os.path.join(REAL_HOME, ".claude.json")
@@ -300,15 +222,9 @@ def fetch_claude_quota(cache_ttl=0):
             with urllib.request.urlopen(make_usage_req(token), timeout=4) as response:
                 usage = json.loads(response.read().decode())
         except urllib.error.HTTPError as he:
-            if he.code == 401 and creds and (oauth or {}).get("refreshToken"):
-                refreshed = refresh_claude_token(creds, env)
-                if refreshed:
-                    with urllib.request.urlopen(make_usage_req(refreshed), timeout=4) as response:
-                        usage = json.loads(response.read().decode())
-                else:
-                    raise
-            else:
-                raise
+            if he.code == 401:
+                raise RuntimeError("token wygasł — uruchom 'claude', aby go odświeżyć") from he
+            raise
 
         res_data["usage"] = usage
         try:
@@ -417,42 +333,6 @@ def fetch_cursor_quota(cache_ttl=0):
 # -------------------------------------------------------------
 # 3. Codex Fetcher
 # -------------------------------------------------------------
-def refresh_codex_token(auth_data, auth_file):
-    refresh_token = auth_data.get("tokens", {}).get("refresh_token")
-    if not refresh_token:
-        return None
-    try:
-        data = urllib.parse.urlencode({
-            "grant_type": "refresh_token",
-            "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
-            "refresh_token": refresh_token,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            "https://auth.openai.com/oauth/token",
-            data=data,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "codex-cli/0.156.1",
-            }
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            new_tokens = json.loads(resp.read().decode())
-            if "access_token" in new_tokens:
-                auth_data["tokens"]["access_token"] = new_tokens["access_token"]
-            if "refresh_token" in new_tokens:
-                auth_data["tokens"]["refresh_token"] = new_tokens["refresh_token"]
-            if "id_token" in new_tokens:
-                auth_data["tokens"]["id_token"] = new_tokens["id_token"]
-            auth_data["last_refresh"] = datetime.now(timezone.utc).isoformat()
-            try:
-                with open(auth_file, "w") as f:
-                    json.dump(auth_data, f, indent=2)
-            except Exception:
-                pass
-            return auth_data["tokens"].get("access_token")
-    except Exception:
-        return None
-
 def fetch_codex_quota(cache_ttl=0):
     cache_file = os.path.join(CACHE_DIR, "codex_quota.json")
     now = time.time()
@@ -515,16 +395,9 @@ def fetch_codex_quota(cache_ttl=0):
             with urllib.request.urlopen(req, timeout=4) as response:
                 usage = json.loads(response.read().decode())
         except urllib.error.HTTPError as he:
-            if he.code == 401 and tokens.get("refresh_token"):
-                refreshed_token = refresh_codex_token(auth_data, auth_file)
-                if refreshed_token:
-                    req = make_request(refreshed_token)
-                    with urllib.request.urlopen(req, timeout=4) as response:
-                        usage = json.loads(response.read().decode())
-                else:
-                    raise
-            else:
-                raise
+            if he.code == 401:
+                raise RuntimeError("token wygasł — uruchom 'codex', aby go odświeżyć") from he
+            raise
 
         res_data["usage"] = usage
         if usage.get("email"):
