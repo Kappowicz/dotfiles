@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Official native installers; existing installations are left alone.
+set -uo pipefail
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+FAILED=0
+WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-cli.XXXXXX") || exit 1
+trap 'rm -rf "$WORK_DIR"' EXIT
+native_install() {
+  local command_name="$1" url="$2"
+  shift 2
+  if command -v "$command_name" >/dev/null 2>&1; then
+    echo "   already installed: $command_name"
+    return
+  fi
+  echo "==> Installing $command_name..."
+  if curl -fsSL "$url" -o "$WORK_DIR/$command_name.sh" && bash "$WORK_DIR/$command_name.sh" "$@"; then
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+      echo "Installer completed but $command_name is missing from PATH." >&2
+      FAILED=1
+    fi
+  else
+    echo "Installation failed: $command_name" >&2
+    FAILED=1
+  fi
+}
+native_install claude https://claude.ai/install.sh
+native_install agent https://cursor.com/install
+native_install agy https://antigravity.google/cli/install.sh --skip-aliases --skip-path
+if command -v codex >/dev/null 2>&1; then
+  echo "   already installed: codex"
+elif ! command -v npm >/dev/null 2>&1; then
+  echo "npm is required to install Codex CLI." >&2
+  FAILED=1
+elif ! npm install -g @openai/codex; then
+  FAILED=1
+fi
+exit "$FAILED"

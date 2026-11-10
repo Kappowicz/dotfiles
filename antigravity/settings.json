@@ -1,0 +1,11 @@
+{
+  "colorScheme": "dark",
+  "model": "Gemini 3.8 Flash (High)",
+  "showFeedbackSurvey": false,
+  "statusLine": {
+    "type": "",
+    "command": "python3 \"$HOME/.gemini/antigravity-cli/statusline.py\"",
+    "enabled": true,
+    "stack_with_default": true
+  }
+}

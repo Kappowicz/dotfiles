@@ -1,0 +1,1631 @@
+#!/usr/bin/env python3
+"""
+check_limits.py - Sprawdza i wyświetla pozostałe limity dla wszystkich agentów:
+  1. agent (Cursor CLI)
+  2. claude (Claude Code CLI)
+  3. codex (Codex CLI)
+  4. agy   (Google Antigravity - account)
+  5. agy2  (Google Antigravity - account)
+  6. agy3  (Google Antigravity - account)
+"""
+
+import sys
+import os
+import pwd
+import io
+import json
+import math
+import time
+import signal
+import subprocess
+import urllib.request
+import urllib.error
+import urllib.parse
+import argparse
+from datetime import datetime, timezone
+import concurrent.futures
+
+REAL_HOME = os.environ.get("LIMITS_HOME", pwd.getpwuid(os.getuid()).pw_dir)
+CACHE_DIR = os.path.join(REAL_HOME, ".cache", "agent_limits")
+SCRIPT_PATH = os.path.abspath(__file__)
+
+AGY_PROFILES = [
+    {
+        "name": "agy",
+        "label": "agy (Profil 1)",
+        "home": REAL_HOME,
+    },
+    {
+        "name": "agy2",
+        "label": "agy2 (Profil 2)",
+        "home": os.path.join(REAL_HOME, ".agy-profile2"),
+    },
+    {
+        "name": "agy3",
+        "label": "agy3 (Profil 3)",
+        "home": os.path.join(REAL_HOME, ".agy-profile3"),
+    },
+]
+
+# ANSI styling
+BOLD = "\033[1m"
+DIM = "\033[90m"
+RESET = "\033[0m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+RED = "\033[31m"
+CYAN = "\033[36m"
+BLUE = "\033[34m"
+MAGENTA = "\033[35m"
+
+def color_for_remaining(rem_pct):
+    if rem_pct is None:
+        return DIM
+    if rem_pct > 40:
+        return GREEN
+    if rem_pct > 15:
+        return YELLOW
+    return RED
+
+def render_bar(rem_pct, width=16):
+    if rem_pct is None:
+        return f"{DIM}[{'─'*width}]{RESET}"
+    pct = max(0.0, min(100.0, float(rem_pct)))
+    filled = int(round((pct / 100.0) * width))
+    empty = width - filled
+    color = color_for_remaining(pct)
+    bar = f"{color}{'█'*filled}{DIM}{'░'*empty}{RESET}"
+    return f"[{bar}]"
+
+def format_relative_seconds(seconds):
+    if seconds is None or seconds < 0:
+        return ""
+    seconds = int(seconds)
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    minutes = (seconds % 3600) // 60
+    if days > 0:
+        return f"{days}d {hours}h"
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    if minutes > 0:
+        return f"{minutes}m"
+    return f"{max(1, seconds)}s"
+
+def format_age(seconds):
+    if seconds is None:
+        return ""
+    if seconds < 15:
+        return "przed chwilą"
+    return f"{format_relative_seconds(seconds)} temu"
+
+def parse_iso_duration(iso_str):
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        diff = (dt - now).total_seconds()
+        return max(0, int(diff))
+    except Exception:
+        return None
+
+def format_reset_time(iso_str_or_sec):
+    if isinstance(iso_str_or_sec, (int, float)):
+        sec = int(iso_str_or_sec)
+        if sec > 1_000_000_000:
+            sec = max(0, sec - int(time.time()))
+    else:
+        sec = parse_iso_duration(iso_str_or_sec)
+    if sec is None or sec <= 0:
+        return ""
+    return f"za {format_relative_seconds(sec)}"
+
+def shorten_account(account):
+    """
+    Skraca adres email lub identyfikator konta do minimalnej liczby liter
+    potrzebnej do identyfikacji (np. user@... -> use..., s31493@... -> s31...).
+    """
+    if not account:
+        return ""
+    if "@" in account:
+        user = account.split("@", 1)[0]
+        if len(user) > 3:
+            return f"{user[:3]}..."
+        return user
+    return account
+
+# -------------------------------------------------------------
+# 1. Claude Fetcher
+# -------------------------------------------------------------
+CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CLAUDE_DEFAULT_SCOPES = [
+    "user:profile",
+    "user:inference",
+    "user:sessions:claude_code",
+    "user:mcp_servers",
+    "user:file_upload",
+]
+
+def refresh_claude_token(creds, env):
+    oauth = creds.get("claudeAiOauth") if isinstance(creds.get("claudeAiOauth"), dict) else creds
+    refresh_token = oauth.get("refreshToken")
+    if not refresh_token:
+        return None
+    scopes = oauth.get("scopes") or CLAUDE_DEFAULT_SCOPES
+    scope_str = " ".join(scopes) if isinstance(scopes, list) else str(scopes)
+    client_id = oauth.get("clientId") or CLAUDE_OAUTH_CLIENT_ID
+    try:
+        payload = json.dumps({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "scope": scope_str,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://platform.claude.com/v1/oauth/token",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "Claude-Code/1.0.0",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            new_tok = json.loads(resp.read().decode("utf-8"))
+        new_access = new_tok.get("access_token")
+        if not new_access:
+            return None
+        now_ms = int(time.time() * 1000)
+        oauth["accessToken"] = new_access
+        if new_tok.get("refresh_token"):
+            oauth["refreshToken"] = new_tok["refresh_token"]
+        if isinstance(new_tok.get("expires_in"), (int, float)):
+            oauth["expiresAt"] = now_ms + int(new_tok["expires_in"] * 1000)
+        if isinstance(new_tok.get("refresh_token_expires_in"), (int, float)):
+            oauth["refreshTokenExpiresAt"] = now_ms + int(new_tok["refresh_token_expires_in"] * 1000)
+        if isinstance(new_tok.get("scope"), str):
+            oauth["scopes"] = [s for s in new_tok["scope"].split(" ") if s]
+        if "claudeAiOauth" in creds:
+            creds["claudeAiOauth"] = oauth
+        else:
+            creds = oauth
+
+        try:
+            acct = os.environ.get("USER") or os.path.basename(REAL_HOME)
+            hex_payload = json.dumps(creds, separators=(",", ":")).encode("utf-8").hex()
+            sec_cmd = f'add-generic-password -U -a "{acct}" -s "Claude Code-credentials" -X "{hex_payload}"\n'
+            if len(sec_cmd) <= 4000:
+                subprocess.run(
+                    ["security", "-i"],
+                    input=sec_cmd,
+                    text=True,
+                    capture_output=True,
+                    timeout=4,
+                    env=env,
+                )
+            else:
+                subprocess.run(
+                    ["security", "add-generic-password", "-U", "-a", acct, "-s", "Claude Code-credentials", "-X", hex_payload],
+                    capture_output=True,
+                    timeout=4,
+                    env=env,
+                )
+        except Exception:
+            pass
+        return new_access
+    except Exception:
+        return None
+
+def sanitize_expired_claude_windows(usage):
+    """Jeśli w cache'u minął czas resets_at danego okna, wyzeruj jego zużycie."""
+    if not isinstance(usage, dict):
+        return
+    for key in ("five_hour", "seven_day"):
+        win = usage.get(key)
+        if not isinstance(win, dict):
+            continue
+        resets_at = win.get("resets_at")
+        if resets_at and parse_iso_duration(resets_at) == 0:
+            win["utilization"] = 0.0
+            win["resets_at"] = None
+            win["locked_reason"] = None
+
+def fetch_claude_quota(cache_ttl=0):
+    cache_file = os.path.join(CACHE_DIR, "claude_quota.json")
+    now = time.time()
+    if cache_ttl > 0 and os.path.exists(cache_file):
+        try:
+            mtime = os.path.getmtime(cache_file)
+            if now - mtime < cache_ttl:
+                with open(cache_file) as f:
+                    data = json.load(f)
+                    data["age_seconds"] = int(now - mtime)
+                    return data
+        except Exception:
+            pass
+
+    res_data = {
+        "status": "ok",
+        "agent": "claude",
+        "account": "Claude Pro",
+        "details": {}
+    }
+    token = None
+    creds = None
+    oauth = None
+    env = os.environ.copy()
+    env["HOME"] = REAL_HOME
+    try:
+        cmd = ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        p = subprocess.run(cmd, capture_output=True, text=True, check=True, env=env)
+        creds = json.loads(p.stdout.strip())
+        oauth = creds.get("claudeAiOauth") or creds
+        token = oauth.get("accessToken")
+        expires_at = oauth.get("expiresAt")
+        if (not token or (isinstance(expires_at, (int, float)) and now * 1000 >= expires_at - 30000)) and oauth.get("refreshToken"):
+            refreshed = refresh_claude_token(creds, env)
+            if refreshed:
+                token = refreshed
+    except Exception as e:
+        # Fallback to ~/.claude.json
+        claude_json_path = os.path.join(REAL_HOME, ".claude.json")
+        if os.path.exists(claude_json_path):
+            try:
+                with open(claude_json_path) as f:
+                    cdata = json.load(f)
+                    cached = cdata.get("cachedUsageUtilization", {}).get("utilization", {})
+                    if cached:
+                        res_data["cached"] = True
+                        res_data["usage"] = cached
+                        return res_data
+            except Exception:
+                pass
+        res_data["status"] = "error"
+        res_data["error"] = f"Brak tokena w Keychain: {e}"
+        return res_data
+
+    def make_usage_req(tok):
+        return urllib.request.Request(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={
+                "Authorization": f"Bearer {tok}",
+                "User-Agent": "Claude-Code/1.0.0",
+                "anthropic-client": "claude-code",
+            }
+        )
+
+    try:
+        try:
+            with urllib.request.urlopen(make_usage_req(token), timeout=4) as response:
+                usage = json.loads(response.read().decode())
+        except urllib.error.HTTPError as he:
+            if he.code == 401 and creds and (oauth or {}).get("refreshToken"):
+                refreshed = refresh_claude_token(creds, env)
+                if refreshed:
+                    with urllib.request.urlopen(make_usage_req(refreshed), timeout=4) as response:
+                        usage = json.loads(response.read().decode())
+                else:
+                    raise
+            else:
+                raise
+
+        res_data["usage"] = usage
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(cache_file, "w") as f:
+                json.dump(res_data, f)
+        except Exception:
+            pass
+        return res_data
+    except Exception as e:
+        # If live fetch fails, try to return stale cache
+        if os.path.exists(cache_file):
+            try:
+                mtime = os.path.getmtime(cache_file)
+                with open(cache_file) as f:
+                    data = json.load(f)
+                    data["stale"] = True
+                    data["age_seconds"] = int(now - mtime)
+                    data["stale_error"] = str(e)
+                    sanitize_expired_claude_windows(data.get("usage"))
+                    return data
+            except Exception:
+                pass
+        res_data["status"] = "error"
+        res_data["error"] = f"Błąd API Anthropic: {e}"
+        return res_data
+
+# -------------------------------------------------------------
+# 2. Cursor (agent) Fetcher
+# -------------------------------------------------------------
+def fetch_cursor_quota(cache_ttl=0):
+    cache_file = os.path.join(CACHE_DIR, "cursor_quota.json")
+    now = time.time()
+    if cache_ttl > 0 and os.path.exists(cache_file):
+        try:
+            mtime = os.path.getmtime(cache_file)
+            if now - mtime < cache_ttl:
+                with open(cache_file) as f:
+                    data = json.load(f)
+                    data["age_seconds"] = int(now - mtime)
+                    return data
+        except Exception:
+            pass
+
+    res_data = {
+        "status": "ok",
+        "agent": "agent",
+        "account": "Cursor Pro",
+        "details": {}
+    }
+    env = os.environ.copy()
+    env["HOME"] = REAL_HOME
+
+    # Try getting user email
+    try:
+        p_stat = subprocess.run(["agent", "status"], capture_output=True, text=True, timeout=2, env=env)
+        for line in p_stat.stdout.splitlines():
+            if "Logged in as" in line:
+                res_data["account"] = line.replace("✓", "").replace("Logged in as", "").strip()
+    except Exception:
+        pass
+
+    try:
+        cmd = ["security", "find-generic-password", "-a", "cursor-user", "-s", "cursor-access-token", "-w"]
+        p = subprocess.run(cmd, capture_output=True, text=True, check=True, env=env)
+        cursor_token = p.stdout.strip()
+    except Exception as e:
+        res_data["status"] = "error"
+        res_data["error"] = f"Brak tokena w Keychain: {e}"
+        return res_data
+
+    try:
+        req = urllib.request.Request(
+            "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
+            data=b"{}",
+            headers={
+                "Authorization": f"Bearer {cursor_token}",
+                "Content-Type": "application/json",
+                "Connect-Protocol-Version": "1"
+            },
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=4) as response:
+            usage = json.loads(response.read().decode())
+            res_data["usage"] = usage
+            try:
+                os.makedirs(CACHE_DIR, exist_ok=True)
+                with open(cache_file, "w") as f:
+                    json.dump(res_data, f)
+            except Exception:
+                pass
+            return res_data
+    except Exception as e:
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file) as f:
+                    data = json.load(f)
+                    data["stale"] = True
+                    return data
+            except Exception:
+                pass
+        res_data["status"] = "error"
+        res_data["error"] = f"Błąd API Cursor: {e}"
+        return res_data
+
+# -------------------------------------------------------------
+# 3. Codex Fetcher
+# -------------------------------------------------------------
+def refresh_codex_token(auth_data, auth_file):
+    refresh_token = auth_data.get("tokens", {}).get("refresh_token")
+    if not refresh_token:
+        return None
+    try:
+        data = urllib.parse.urlencode({
+            "grant_type": "refresh_token",
+            "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+            "refresh_token": refresh_token,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://auth.openai.com/oauth/token",
+            data=data,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": "codex-cli/0.156.1",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            new_tokens = json.loads(resp.read().decode())
+            if "access_token" in new_tokens:
+                auth_data["tokens"]["access_token"] = new_tokens["access_token"]
+            if "refresh_token" in new_tokens:
+                auth_data["tokens"]["refresh_token"] = new_tokens["refresh_token"]
+            if "id_token" in new_tokens:
+                auth_data["tokens"]["id_token"] = new_tokens["id_token"]
+            auth_data["last_refresh"] = datetime.now(timezone.utc).isoformat()
+            try:
+                with open(auth_file, "w") as f:
+                    json.dump(auth_data, f, indent=2)
+            except Exception:
+                pass
+            return auth_data["tokens"].get("access_token")
+    except Exception:
+        return None
+
+def fetch_codex_quota(cache_ttl=0):
+    cache_file = os.path.join(CACHE_DIR, "codex_quota.json")
+    now = time.time()
+    if cache_ttl > 0 and os.path.exists(cache_file):
+        try:
+            mtime = os.path.getmtime(cache_file)
+            if now - mtime < cache_ttl:
+                with open(cache_file) as f:
+                    data = json.load(f)
+                    data["age_seconds"] = int(now - mtime)
+                    return data
+        except Exception:
+            pass
+
+    res_data = {
+        "status": "ok",
+        "agent": "codex",
+        "account": "Codex",
+        "details": {}
+    }
+
+    auth_file = os.path.join(REAL_HOME, ".codex", "auth.json")
+    if not os.path.exists(auth_file):
+        res_data["status"] = "error"
+        res_data["error"] = "Brak pliku ~/.codex/auth.json (użyj 'codex login')"
+        return res_data
+
+    try:
+        with open(auth_file) as f:
+            auth_data = json.load(f)
+    except Exception as e:
+        res_data["status"] = "error"
+        res_data["error"] = f"Błąd odczytu auth.json: {e}"
+        return res_data
+
+    tokens = auth_data.get("tokens") or {}
+    token = tokens.get("access_token")
+    account_id = tokens.get("account_id")
+
+    if not token:
+        res_data["status"] = "error"
+        res_data["error"] = "Brak tokena w ~/.codex/auth.json"
+        return res_data
+
+    def make_request(auth_tok):
+        r = urllib.request.Request(
+            "https://chatgpt.com/backend-api/wham/usage",
+            headers={
+                "Authorization": f"Bearer {auth_tok}",
+                "User-Agent": "codex-cli/0.156.1",
+            }
+        )
+        if account_id:
+            r.add_header("chatgpt-account-id", account_id)
+        return r
+
+    try:
+        try:
+            req = make_request(token)
+            with urllib.request.urlopen(req, timeout=4) as response:
+                usage = json.loads(response.read().decode())
+        except urllib.error.HTTPError as he:
+            if he.code == 401 and tokens.get("refresh_token"):
+                refreshed_token = refresh_codex_token(auth_data, auth_file)
+                if refreshed_token:
+                    req = make_request(refreshed_token)
+                    with urllib.request.urlopen(req, timeout=4) as response:
+                        usage = json.loads(response.read().decode())
+                else:
+                    raise
+            else:
+                raise
+
+        res_data["usage"] = usage
+        if usage.get("email"):
+            res_data["email"] = usage["email"]
+            res_data["account"] = usage["email"]
+        if usage.get("plan_type"):
+            res_data["plan_type"] = usage["plan_type"]
+
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(cache_file, "w") as f:
+                json.dump(res_data, f)
+        except Exception:
+            pass
+        return res_data
+    except Exception as e:
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file) as f:
+                    data = json.load(f)
+                    data["stale"] = True
+                    return data
+            except Exception:
+                pass
+        res_data["status"] = "error"
+        res_data["error"] = f"Błąd API Codex: {e}"
+        return res_data
+
+# -------------------------------------------------------------
+# 4. Google Antigravity (agy, agy2, agy3)
+# -------------------------------------------------------------
+def probe_single_agy(profile, timeout=5.0):
+    import pty
+    master, slave = pty.openpty()
+    env = os.environ.copy()
+    env["HOME"] = profile["home"]
+    env["TERM"] = "xterm-256color"
+    for k in list(env.keys()):
+        if k.startswith("ANTIGRAVITY_"):
+            del env[k]
+
+    try:
+        proc = subprocess.Popen(
+            [os.path.join(REAL_HOME, ".local", "bin", "agy")],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            env=env,
+            close_fds=True
+        )
+        time.sleep(timeout)
+        proc.terminate()
+        try:
+            proc.wait(timeout=1.0)
+        except Exception:
+            proc.kill()
+    except Exception:
+        pass
+    finally:
+        try:
+            os.close(master)
+            os.close(slave)
+        except Exception:
+            pass
+
+def probe_all_agy(profiles_to_probe):
+    if not profiles_to_probe:
+        return
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(profiles_to_probe)) as executor:
+        futures = [executor.submit(probe_single_agy, p) for p in profiles_to_probe]
+        concurrent.futures.wait(futures)
+
+def fetch_agy_quotas(force_refresh=False, fast_mode=False, startup_mode=False):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    results = {}
+    profiles_needing_probe = []
+
+    now = time.time()
+    for prof in AGY_PROFILES:
+        cache_file = os.path.join(CACHE_DIR, f"{prof['name']}.json")
+        # Zawsze odświeżaj (chyba że --fast); brak cache też wymusza probe
+        need_probe = (force_refresh or not fast_mode) or not os.path.exists(cache_file)
+
+        if need_probe and not fast_mode:
+            profiles_needing_probe.append(prof)
+
+    if profiles_needing_probe:
+        probe_names = ", ".join(p["name"] for p in profiles_needing_probe)
+        sys.stderr.write(f"\033[90m⏳ Odświeżam limity Antigravity ({probe_names})...\033[0m\r")
+        sys.stderr.flush()
+        probe_all_agy(profiles_needing_probe)
+        sys.stderr.write(" " * 60 + "\r")
+        sys.stderr.flush()
+
+    for prof in AGY_PROFILES:
+        cache_file = os.path.join(CACHE_DIR, f"{prof['name']}.json")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file) as f:
+                    cdata = json.load(f)
+                    mtime = os.path.getmtime(cache_file)
+                    results[prof["name"]] = {
+                        "status": "ok",
+                        "profile": prof,
+                        "data": cdata,
+                        "age_seconds": int(now - mtime)
+                    }
+                    continue
+            except Exception as e:
+                results[prof["name"]] = {"status": "error", "profile": prof, "error": str(e)}
+        else:
+            results[prof["name"]] = {
+                "status": "error",
+                "profile": prof,
+                "error": "Brak danych w cache. Uruchom z opcją --refresh."
+            }
+
+    return results
+
+# -------------------------------------------------------------
+# Sort key: remaining % of ~7-day / weekly window (desc)
+# -------------------------------------------------------------
+def rem_7d_claude(res):
+    if not res or res.get("status") != "ok":
+        return -1.0
+    q7 = (res.get("usage") or {}).get("seven_day") or {}
+    u7 = q7.get("utilization")
+    if u7 is None:
+        return -1.0
+    return max(0.0, 100.0 - float(u7))
+
+def rem_7d_cursor(res):
+    """Cursor ma cykl rozliczeniowy, nie okno 7d — używamy całkowitego % jako odpowiednika."""
+    if not res or res.get("status") != "ok":
+        return -1.0
+    tot_used = ((res.get("usage") or {}).get("planUsage") or {}).get("totalPercentUsed")
+    if tot_used is None:
+        return -1.0
+    return max(0.0, 100.0 - float(tot_used))
+
+def rem_7d_codex(res):
+    if not res or res.get("status") != "ok":
+        return -1.0
+    sw = ((res.get("usage") or {}).get("rate_limit") or {}).get("secondary_window") or {}
+    u_sw = sw.get("used_percent")
+    if u_sw is None:
+        return -1.0
+    return max(0.0, 100.0 - float(u_sw))
+
+def rem_7d_agy(res):
+    if not res or res.get("status") != "ok":
+        return -1.0
+    quota = (res.get("data") or {}).get("quota") or {}
+    gw_rem = (quota.get("gemini-weekly") or {}).get("remaining_fraction")
+    aw_rem = (quota.get("gemini-argon-wtu-weekly") or {}).get("remaining_fraction")
+    vals = [float(v) * 100.0 for v in (gw_rem, aw_rem) if v is not None]
+    if not vals:
+        return -1.0
+    return min(vals)
+
+# -------------------------------------------------------------
+# Reset timeline (7d / weekly + agent cycle)
+# -------------------------------------------------------------
+def to_reset_seconds(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        sec = int(value)
+        if sec > 1_000_000_000:
+            sec = max(0, sec - int(time.time()))
+        return max(0, sec)
+    return parse_iso_duration(value)
+
+def collect_reset_timeline_events(cursor_res, claude_res, codex_res, agy_res, filter_target):
+    """Zbiera resety: limity 7-dniowe/weekly + odnowienie cyklu agenta."""
+    events = []
+
+    if cursor_res and cursor_res.get("status") == "ok" and filter_target in ("all", "agent", "cursor"):
+        end_ms = (cursor_res.get("usage") or {}).get("billingCycleEnd")
+        if end_ms:
+            sec = int(end_ms) / 1000.0 - time.time()
+            if sec > 0:
+                events.append({"sec": sec, "name": "agent", "kind": "cykl", "color": BLUE})
+
+    if claude_res and claude_res.get("status") == "ok" and filter_target in ("all", "claude"):
+        q7 = ((claude_res.get("usage") or {}).get("seven_day") or {})
+        u7 = q7.get("utilization")
+        sec = to_reset_seconds(q7.get("resets_at"))
+        if sec and sec > 0 and (u7 is None or float(u7) > 0.1):
+            events.append({"sec": float(sec), "name": "claude", "kind": "7d", "color": MAGENTA})
+
+    if codex_res and codex_res.get("status") == "ok" and filter_target in ("all", "codex", "openai"):
+        sw = ((codex_res.get("usage") or {}).get("rate_limit") or {}).get("secondary_window") or {}
+        u_sw = sw.get("used_percent")
+        sec = to_reset_seconds(sw.get("reset_after_seconds") or sw.get("reset_at"))
+        if sec and sec > 0 and (u_sw is None or float(u_sw) > 0.1):
+            events.append({"sec": float(sec), "name": "codex", "kind": "7d", "color": GREEN})
+
+    for a_name in ("agy", "agy2", "agy3"):
+        if a_name not in (agy_res or {}):
+            continue
+        if filter_target not in ("all", "agy-all", "google") and filter_target != a_name:
+            continue
+        res = agy_res[a_name]
+        if res.get("status") != "ok":
+            continue
+        quota = (res.get("data") or {}).get("quota") or {}
+        gw = quota.get("gemini-weekly") or {}
+        aw = quota.get("gemini-argon-wtu-weekly") or {}
+
+        candidates = []
+        for q_obj in (gw, aw):
+            rem = q_obj.get("remaining_fraction")
+            sec = to_reset_seconds(q_obj.get("reset_in_seconds"))
+            if sec and sec > 0 and rem is not None and float(rem) < 0.999:
+                candidates.append(float(sec))
+
+        if candidates:
+            events.append({"sec": min(candidates), "name": a_name, "kind": "7d", "color": CYAN})
+
+    events.sort(key=lambda e: e["sec"])
+    return events
+
+def print_reset_timeline(events, axis_width=56):
+    if not events:
+        return
+
+    max_sec = max(e["sec"] for e in events)
+    if max_sec <= 0:
+        return
+
+    n = len(events)
+    time_labels = [format_relative_seconds(int(e["sec"])) for e in events]
+    name_labels = [e["name"] for e in events]
+    kind_labels = [e["kind"] for e in events]
+    col_w = [
+        max(len(time_labels[i]), len(name_labels[i]), len(kind_labels[i]), 1)
+        for i in range(n)
+    ]
+
+    # Wagi luk (skala log) — od „teraz” do pierwszego, między resetami, na końcu
+    secs = [e["sec"] for e in events]
+    weights = [math.log1p(secs[0])]
+    for i in range(1, n):
+        weights.append(max(0.15, math.log1p(secs[i]) - math.log1p(secs[i - 1])))
+    weights.append(0.4)
+
+    min_gaps = 1  # min. 1 znak między kolumnami / na brzegach gdy starczy miejsca
+    needed = sum(col_w) + min_gaps * (n + 1)
+    width = max(axis_width, needed)
+    extra = width - sum(col_w)
+    wsum = sum(weights) or 1.0
+    # largest remainder: najpierw floor, potem rozdaj resztę
+    exact = [extra * (w / wsum) for w in weights]
+    gaps = [int(x) for x in exact]
+    # gwarantuj min. 1 na lukę jeśli extra starczy
+    if extra >= n + 1:
+        for i in range(n + 1):
+            if gaps[i] < 1:
+                gaps[i] = 1
+        while sum(gaps) > extra:
+            gi = max(range(n + 1), key=lambda i: gaps[i])
+            if gaps[gi] > 1:
+                gaps[gi] -= 1
+            else:
+                break
+    leftover = extra - sum(gaps)
+    order = sorted(range(n + 1), key=lambda i: exact[i] - gaps[i], reverse=True)
+    for k in range(leftover):
+        gaps[order[k % (n + 1)]] += 1
+
+    # Pozycje markerów = środek kolumny
+    positions = []
+    cursor = gaps[0]
+    for i in range(n):
+        positions.append(cursor + col_w[i] // 2)
+        cursor += col_w[i] + gaps[i + 1]
+
+    axis_chars = ["─"] * width
+    for i, p in enumerate(positions):
+        if 0 <= p < width:
+            axis_chars[p] = "●" if i % 2 == 0 else "┬"
+    axis = "".join(axis_chars)
+
+    stems = [" "] * width
+    for p in positions:
+        if 0 <= p < width:
+            stems[p] = "│"
+
+    def place_in_cols(labels):
+        line = [" "] * width
+        c = gaps[0]
+        for i, label in enumerate(labels):
+            start = c + max(0, (col_w[i] - len(label)) // 2)
+            for j, ch in enumerate(label):
+                if 0 <= start + j < width:
+                    line[start + j] = ch
+            c += col_w[i] + gaps[i + 1]
+        return "".join(line)
+
+    times = place_in_cols(time_labels)
+    kinds = place_in_cols(kind_labels)
+
+    # Kolorowe nazwy
+    name_buf = [" "] * width
+    name_spans = []
+    c = gaps[0]
+    for i, e in enumerate(events):
+        label = name_labels[i]
+        start = c + max(0, (col_w[i] - len(label)) // 2)
+        for j, ch in enumerate(label):
+            if 0 <= start + j < width:
+                name_buf[start + j] = ch
+        name_spans.append((start, start + len(label), e["color"]))
+        c += col_w[i] + gaps[i + 1]
+
+    colored = []
+    i = 0
+    span_at = {s[0]: s for s in name_spans}
+    while i < width:
+        if i in span_at:
+            start, end, color = span_at[i]
+            colored.append(f"{color}{BOLD}{''.join(name_buf[start:end])}{RESET}")
+            i = end
+        else:
+            colored.append(name_buf[i])
+            i += 1
+
+    max_label = format_relative_seconds(int(max_sec))
+    pad = " " * len("Resety ▸ teraz ")
+
+    print(f"{DIM}Resety ▸{RESET} teraz {DIM}{axis}►{RESET} {DIM}{max_label}{RESET}")
+    print(f"{pad}{DIM}{''.join(stems)}{RESET}")
+    print(f"{pad}{DIM}{times}{RESET}")
+    print(f"{pad}{''.join(colored)}")
+    print(f"{pad}{DIM}{kinds}{RESET}")
+
+# -------------------------------------------------------------
+# Formatted Output
+# -------------------------------------------------------------
+def print_separator():
+    print(f"{DIM}{'─' * 66}{RESET}")
+
+def print_banner(subtitle=None, tight=False):
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    extra = f" {DIM}{subtitle}{RESET}" if subtitle else ""
+    if tight:
+        print(f"{BOLD}{CYAN}=== POZOSTAŁE LIMITY AGENTÓW AI ==={RESET} {DIM}({now_str}){RESET}{extra}")
+    else:
+        print(f"\n{BOLD}{CYAN}=== POZOSTAŁE LIMITY AGENTÓW AI ==={RESET} {DIM}({now_str}){RESET}{extra}\n")
+
+def print_loading_row(label):
+    print(f"  • {label:<19} {render_bar(None)} {DIM}  …%{RESET} {DIM}ładowanie…{RESET}")
+
+def read_json_cache(filename):
+    path = os.path.join(CACHE_DIR, filename)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        data["age_seconds"] = int(time.time() - os.path.getmtime(path))
+        data["from_cache"] = True
+        return data
+    except Exception:
+        return None
+
+def placeholder_claude():
+    return {"status": "ok", "placeholder": True, "agent": "claude", "account": "…"}
+
+def placeholder_cursor():
+    return {"status": "ok", "placeholder": True, "agent": "agent", "account": "…"}
+
+def placeholder_codex():
+    return {"status": "ok", "placeholder": True, "agent": "codex", "account": "…"}
+
+def placeholder_agy(prof):
+    return {
+        "status": "ok",
+        "placeholder": True,
+        "profile": prof,
+        "data": {},
+        "age_seconds": None,
+    }
+
+def load_startup_snapshot():
+    """Natychmiastowy snapshot: cache albo placeholdery — zero sieci."""
+    claude_res = read_json_cache("claude_quota.json")
+    if claude_res:
+        sanitize_expired_claude_windows(claude_res.get("usage"))
+    else:
+        claude_res = placeholder_claude()
+    cursor_res = read_json_cache("cursor_quota.json") or placeholder_cursor()
+    codex_res = read_json_cache("codex_quota.json") or placeholder_codex()
+    agy_res = fetch_agy_quotas(fast_mode=True)
+    for prof in AGY_PROFILES:
+        if prof["name"] not in agy_res or agy_res[prof["name"]].get("status") != "ok":
+            agy_res[prof["name"]] = placeholder_agy(prof)
+        else:
+            agy_res[prof["name"]]["from_cache"] = True
+    return claude_res, cursor_res, codex_res, agy_res
+
+def weekly_limit_exhausted(used_pct):
+    """True gdy okno 7d/weekly jest wyczerpane — wtedy krótsze okno i tak nie działa."""
+    if used_pct is None:
+        return False
+    return float(used_pct) >= 100.0
+
+def display_claude(res):
+    acc_label = shorten_account(res.get('account', 'Claude Pro'))
+    stale_note = ""
+    if res.get("stale"):
+        age_str = format_age(res.get("age_seconds"))
+        stale_note = f" · {YELLOW}cache ({age_str}) — błąd odświeżania{RESET}{DIM}"
+    print(f"{BOLD}{MAGENTA}🤖 claude{RESET} {DIM}(Claude Code CLI · {acc_label}{stale_note}){RESET}")
+    if res.get("placeholder"):
+        print_loading_row("Limit 5-godzinny:")
+        print_loading_row("Limit 7-dniowy:")
+        return
+    if res.get("status") != "ok":
+        print(f"  {RED}Błąd: {res.get('error')}{RESET}")
+        return
+
+    usage = res.get("usage", {})
+    q5 = usage.get("five_hour") or {}
+    q7 = usage.get("seven_day") or {}
+    u5 = q5.get("utilization")
+    u7 = q7.get("utilization")
+    # Przy wyczerpanym 7d pokaż ZABLOKOWANY (jak w agy), nawet gdy % 5h > 0
+    blocked_by_weekly = weekly_limit_exhausted(u7) or bool(q5.get("locked_reason"))
+
+    if blocked_by_weekly:
+        print(f"  • Limit 5-godzinny:   {render_bar(0.0)} {RED}{BOLD}ZABLOKOWANY{RESET} {DIM}(limit 7-dniowy wyczerpany){RESET}")
+    elif u5 is not None:
+        rem5 = max(0.0, 100.0 - float(u5))
+        col5 = color_for_remaining(rem5)
+        reset5_str = format_reset_time(q5.get("resets_at"))
+        reset_label = f" {DIM}(reset: {reset5_str}){RESET}" if reset5_str else ""
+        print(f"  • Limit 5-godzinny:   {render_bar(rem5)} {col5}{BOLD}{rem5:5.1f}%{RESET} pozostało {DIM}(zużyto {u5:.1f}%){RESET}{reset_label}")
+
+    if u7 is not None:
+        rem7 = max(0.0, 100.0 - float(u7))
+        col7 = color_for_remaining(rem7)
+        reset7_str = format_reset_time(q7.get("resets_at"))
+        reset_label = f" {DIM}(reset: {reset7_str}){RESET}" if reset7_str else ""
+        print(f"  • Limit 7-dniowy:     {render_bar(rem7)} {col7}{BOLD}{rem7:5.1f}%{RESET} pozostało {DIM}(zużyto {u7:.1f}%){RESET}{reset_label}")
+
+def display_cursor(res):
+    acc_label = shorten_account(res.get('account', 'Cursor Pro'))
+    print(f"{BOLD}{BLUE}⚡ agent{RESET} {DIM}(Cursor CLI · {acc_label}){RESET}")
+    if res.get("placeholder"):
+        print_loading_row("Całkowite użycie:")
+        print_loading_row("Modele Auto:")
+        print_loading_row("Modele API (Named):")
+        return
+    if res.get("status") != "ok":
+        print(f"  {RED}Błąd: {res.get('error')}{RESET}")
+        return
+
+    usage = res.get("usage", {})
+    plan = usage.get("planUsage", {})
+    tot_used = plan.get("totalPercentUsed")
+    auto_used = plan.get("autoPercentUsed")
+    api_used = plan.get("apiPercentUsed")
+
+    end_ms = usage.get("billingCycleEnd")
+    cycle_str = ""
+    if end_ms:
+        try:
+            end_sec = int(end_ms) / 1000
+            diff = end_sec - time.time()
+            days = int(diff // 86400)
+            end_date = datetime.fromtimestamp(end_sec).strftime("%d.%m.%Y")
+            cycle_str = f" {DIM}(odnowienie: {end_date}, za {days} dni){RESET}"
+        except Exception:
+            pass
+
+    if tot_used is not None:
+        rem_tot = max(0.0, 100.0 - float(tot_used))
+        col_tot = color_for_remaining(rem_tot)
+        tot_spend = plan.get("totalSpend", 0) / 100
+        limit_spend = (plan.get("limit") or plan.get("includedSpend", 0)) / 100
+        spend_str = f" {DIM}(${tot_spend:.2f} / ${limit_spend:.2f}){RESET}"
+        print(f"  • {'Całkowite użycie:':<19} {render_bar(rem_tot)} {col_tot}{BOLD}{rem_tot:5.1f}%{RESET} pozostało {DIM}(zużyto {tot_used:.1f}%){RESET}{spend_str}{cycle_str}")
+
+    if auto_used is not None:
+        rem_auto = max(0.0, 100.0 - float(auto_used))
+        col_auto = color_for_remaining(rem_auto)
+        print(f"  • {'Modele Auto:':<19} {render_bar(rem_auto)} {col_auto}{BOLD}{rem_auto:5.1f}%{RESET} pozostało {DIM}(zużyto {auto_used:.1f}%){RESET}")
+
+    if api_used is not None:
+        rem_api = max(0.0, 100.0 - float(api_used))
+        col_api = color_for_remaining(rem_api)
+        print(f"  • {'Modele API (Named):':<19} {render_bar(rem_api)} {col_api}{BOLD}{rem_api:5.1f}%{RESET} pozostało {DIM}(zużyto {api_used:.1f}%){RESET}")
+
+def display_codex(res):
+    email = res.get("email")
+    plan = res.get("plan_type")
+    acc = res.get("account") or "Codex"
+
+    parts = []
+    if email:
+        parts.append(shorten_account(email))
+    elif acc and acc != "Codex":
+        parts.append(shorten_account(acc))
+    if plan:
+        parts.append(f"ChatGPT {plan.capitalize()}")
+    acc_label = " · ".join(parts) if parts else ("…" if res.get("placeholder") else "Codex")
+
+    print(f"{BOLD}{GREEN}🧠 codex{RESET} {DIM}(Codex CLI · {acc_label}){RESET}")
+    if res.get("placeholder"):
+        print_loading_row("Limit 5-godzinny:")
+        print_loading_row("Limit 7-dniowy:")
+        return
+    if res.get("status") != "ok":
+        print(f"  {RED}Błąd: {res.get('error')}{RESET}")
+        return
+
+    usage = res.get("usage", {})
+    rate_limit = usage.get("rate_limit") or {}
+
+    pw = rate_limit.get("primary_window") or {}
+    sw = rate_limit.get("secondary_window") or {}
+    u_pw = pw.get("used_percent")
+    u_sw = sw.get("used_percent")
+    # API bywa niespójne: primary ma jeszcze %, a secondary=100 — wtedy 5h i tak nie działa
+    blocked_by_weekly = weekly_limit_exhausted(u_sw)
+
+    win_sec_pw = pw.get("limit_window_seconds", 18000)
+    win_hrs = win_sec_pw // 3600 if win_sec_pw else 5
+    lbl_pw = f"Limit {win_hrs}-godzinny:"
+
+    if blocked_by_weekly and (u_pw is not None or u_sw is not None):
+        print(f"  • {lbl_pw:<19} {render_bar(0.0)} {RED}{BOLD}ZABLOKOWANY{RESET} {DIM}(limit 7-dniowy wyczerpany){RESET}")
+    elif u_pw is not None:
+        rem_pw = max(0.0, 100.0 - float(u_pw))
+        col_pw = color_for_remaining(rem_pw)
+        sec_pw = pw.get("reset_after_seconds") or pw.get("reset_at")
+        rst_pw = format_reset_time(sec_pw)
+        rst_label = f" {DIM}(reset: {rst_pw}){RESET}" if rst_pw else ""
+        print(f"  • {lbl_pw:<19} {render_bar(rem_pw)} {col_pw}{BOLD}{rem_pw:5.1f}%{RESET} pozostało {DIM}(zużyto {u_pw:.1f}%){RESET}{rst_label}")
+
+    if u_sw is not None:
+        rem_sw = max(0.0, 100.0 - float(u_sw))
+        col_sw = color_for_remaining(rem_sw)
+        sec_sw = sw.get("reset_after_seconds") or sw.get("reset_at")
+        rst_sw = format_reset_time(sec_sw)
+        rst_label = f" {DIM}(reset: {rst_sw}){RESET}" if rst_sw else ""
+        win_sec = sw.get("limit_window_seconds", 604800)
+        win_days = win_sec // 86400 if win_sec else 7
+        lbl = f"Limit {win_days}-dniowy:"
+        print(f"  • {lbl:<19} {render_bar(rem_sw)} {col_sw}{BOLD}{rem_sw:5.1f}%{RESET} pozostało {DIM}(zużyto {u_sw:.1f}%){RESET}{rst_label}")
+
+    credits = usage.get("credits") or {}
+    if credits.get("has_credits"):
+        bal = credits.get("balance", "0")
+        print(f"  • {'Kredyty:':<19} {GREEN}{bal}{RESET}")
+
+def display_antigravity(name, res):
+    prof = res.get("profile", {})
+    email = (res.get("data") or {}).get("email") or prof.get("email", "")
+    short_email = shorten_account(email) if email else "…"
+    age = res.get("age_seconds")
+    age_str = f" · zaktualizowano {format_age(age)}" if age is not None else ""
+
+    print(f"{BOLD}{CYAN}🌐 {name}{RESET} {DIM}(Google Antigravity · {short_email}{age_str}){RESET}")
+    if res.get("placeholder"):
+        print_loading_row("Gemini 5h:")
+        print_loading_row("Gemini 7d (weekly):")
+        print_loading_row("Argon 7d (weekly):")
+        return
+    if res.get("status") != "ok":
+        print(f"  {RED}Błąd: {res.get('error')}{RESET}")
+        return
+
+    data = res.get("data", {})
+    quota = data.get("quota", {})
+
+    # Gemini weekly
+    gw = quota.get("gemini-weekly") or {}
+    gw_disabled = gw.get("disabled", False)
+    gw_rem = gw.get("remaining_fraction")
+    gw_sec = gw.get("reset_in_seconds")
+    gw_exhausted = gw_disabled or (gw_rem is not None and float(gw_rem) <= 0.0)
+
+    # Gemini 5h
+    g5 = quota.get("gemini-5h") or {}
+    g5_disabled = g5.get("disabled", False) or gw_exhausted
+    g5_rem = g5.get("remaining_fraction")
+    g5_sec = g5.get("reset_in_seconds")
+
+    if g5_disabled:
+        print(f"  • Gemini 5h:          {render_bar(0.0)} {RED}{BOLD}ZABLOKOWANY{RESET} {DIM}(limit tygodniowy wyczerpany){RESET}")
+    elif g5_rem is not None:
+        g5_pct = g5_rem * 100.0
+        g5_col = color_for_remaining(g5_pct)
+        g5_rst = f" {DIM}(reset: za {format_relative_seconds(g5_sec)}){RESET}" if g5_sec else ""
+        print(f"  • Gemini 5h:          {render_bar(g5_pct)} {g5_col}{BOLD}{g5_pct:5.1f}%{RESET} pozostało {DIM}(zużyto {100-g5_pct:.1f}%){RESET}{g5_rst}")
+
+    if gw_rem is not None:
+        gw_pct = gw_rem * 100.0
+        gw_col = color_for_remaining(gw_pct)
+        gw_rst = f" {DIM}(reset: za {format_relative_seconds(gw_sec)}){RESET}" if gw_sec else ""
+        print(f"  • Gemini 7d (weekly): {render_bar(gw_pct)} {gw_col}{BOLD}{gw_pct:5.1f}%{RESET} pozostało {DIM}(zużyto {100-gw_pct:.1f}%){RESET}{gw_rst}")
+
+    # Argon weekly
+    aw = quota.get("gemini-argon-wtu-weekly") or {}
+    aw_disabled = aw.get("disabled", False)
+    aw_rem = aw.get("remaining_fraction")
+    aw_sec = aw.get("reset_in_seconds")
+    if aw_disabled:
+        print(f"  • Argon 7d (weekly):  {render_bar(0.0)} {RED}{BOLD}ZABLOKOWANY{RESET} {DIM}(limit tygodniowy wyczerpany){RESET}")
+    elif aw_rem is not None:
+        aw_pct = aw_rem * 100.0
+        aw_col = color_for_remaining(aw_pct)
+        aw_rst = f" {DIM}(reset: za {format_relative_seconds(aw_sec)}){RESET}" if aw_sec else ""
+        print(f"  • Argon 7d (weekly):  {render_bar(aw_pct)} {aw_col}{BOLD}{aw_pct:5.1f}%{RESET} pozostało {DIM}(zużyto {100-aw_pct:.1f}%){RESET}{aw_rst}")
+
+def render_report(claude_res, cursor_res, codex_res, agy_res, filter_target="all",
+                  subtitle=None, show_hint=True, refreshing_note=None, tight=False):
+    """Renderuje pełny raport na stdout."""
+    should_cursor = filter_target in ("all", "agent", "cursor")
+    should_claude = filter_target in ("all", "claude")
+    should_codex = filter_target in ("all", "codex", "openai")
+
+    print_banner(subtitle=subtitle, tight=tight)
+
+    entries = []
+    if should_cursor and cursor_res:
+        entries.append((rem_7d_cursor(cursor_res), lambda: display_cursor(cursor_res)))
+    if should_claude and claude_res:
+        entries.append((rem_7d_claude(claude_res), lambda: display_claude(claude_res)))
+    if should_codex and codex_res:
+        entries.append((rem_7d_codex(codex_res), lambda: display_codex(codex_res)))
+    for a_name in ("agy", "agy2", "agy3"):
+        if a_name in (agy_res or {}) and (filter_target in ("all", "agy-all", "google") or filter_target == a_name):
+            res = agy_res[a_name]
+            entries.append((rem_7d_agy(res), lambda n=a_name, r=res: display_antigravity(n, r)))
+
+    entries.sort(key=lambda e: e[0], reverse=True)
+
+    for i, (_, show) in enumerate(entries):
+        if i > 0:
+            print_separator()
+        show()
+
+    if entries:
+        print_separator()
+
+    reset_events = collect_reset_timeline_events(
+        cursor_res, claude_res, codex_res, agy_res or {}, filter_target
+    )
+    if reset_events:
+        print_reset_timeline(reset_events)
+        print()
+
+    if refreshing_note:
+        print(f"{YELLOW}⏳ {refreshing_note}{RESET}")
+    elif show_hint:
+        print(f"\n{DIM}Wskazówka: Użyj '{BOLD}limits -r{RESET}{DIM}' aby wymusić odświeżenie Antigravity, lub '{BOLD}limits <nazwa>{RESET}{DIM}' aby sprawdzić jednego agenta.{RESET}\n")
+
+def capture_report(*args, **kwargs):
+    buf = io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        render_report(*args, **kwargs)
+    finally:
+        sys.stdout = old
+    return buf.getvalue()
+
+def text_to_lines(text):
+    if text.endswith("\n"):
+        text = text[:-1]
+    return text.split("\n")
+
+def pad_lines(lines, height):
+    lines = list(lines)
+    if len(lines) < height:
+        lines.extend([""] * (height - len(lines)))
+    else:
+        lines = lines[:height]
+    return lines
+
+def fetch_all_live(filter_target="all", force_agy_refresh=True, skip_agy_probe=False):
+    should_fetch_claude = filter_target in ("all", "claude")
+    should_fetch_cursor = filter_target in ("all", "agent", "cursor")
+    should_fetch_codex = filter_target in ("all", "codex", "openai")
+    should_fetch_agy = filter_target in ("all", "agy", "agy2", "agy3", "agy-all", "google")
+
+    # skip_agy_probe: watch co minutę. Claude/Cursor/Codex to jedno HTTP,
+    # Antigravity to start binarki, 5 s czekania i kill — tego nie rób w pętli.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        future_claude = executor.submit(fetch_claude_quota, cache_ttl=0) if should_fetch_claude else None
+        future_cursor = executor.submit(fetch_cursor_quota, cache_ttl=0) if should_fetch_cursor else None
+        future_codex = executor.submit(fetch_codex_quota, cache_ttl=0) if should_fetch_codex else None
+        future_agy = executor.submit(
+            fetch_agy_quotas,
+            force_refresh=force_agy_refresh and not skip_agy_probe,
+            fast_mode=skip_agy_probe,
+            startup_mode=False,
+        ) if should_fetch_agy else None
+
+        claude_res = future_claude.result() if future_claude else None
+        cursor_res = future_cursor.result() if future_cursor else None
+        codex_res = future_codex.result() if future_codex else None
+        agy_res = future_agy.result() if future_agy else {}
+
+    return claude_res, cursor_res, codex_res, agy_res
+
+def resolve_tty_path():
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream.isatty():
+                return os.ttyname(stream.fileno())
+        except Exception:
+            pass
+    if os.path.exists("/dev/tty"):
+        return "/dev/tty"
+    return None
+
+def print_lines(lines):
+    for line in lines:
+        # jawne UTF-8 na stdout (unikamy krzaczków przy podmianie)
+        sys.stdout.buffer.write((line + "\n").encode("utf-8", errors="replace"))
+    sys.stdout.buffer.flush()
+
+def query_cursor_pos(fd):
+    """Zwraca (row, col) z terminala albo None."""
+    import re
+    import termios
+    import tty as tty_mod
+
+    old = termios.tcgetattr(fd)
+    try:
+        tty_mod.setcbreak(fd)
+        termios.tcflush(fd, termios.TCIFLUSH)
+        os.write(fd, b"\x1b[6n")
+        buf = b""
+        while True:
+            chunk = os.read(fd, 1)
+            if not chunk:
+                break
+            buf += chunk
+            if chunk == b"R":
+                break
+            if len(buf) > 32:
+                break
+        m = re.search(rb"\x1b\[(\d+);(\d+)R", buf)
+        if not m:
+            return None
+        return int(m.group(1)), int(m.group(2))
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+def run_lsd_to_tty(tty_fd=None):
+    """
+    Uruchamia lsd na prawdziwym TTY (siatka + ikony).
+    Bez TTY lsd wpada w tryb 1-kolumnowy jak zwykłe ls.
+    """
+    cmd = ["lsd", "--color", "always", "--icon", "always"]
+    kwargs = {"cwd": os.getcwd()}
+    if tty_fd is not None:
+        kwargs["stdin"] = subprocess.DEVNULL
+        kwargs["stdout"] = tty_fd
+        kwargs["stderr"] = tty_fd
+    # else: dziedzicz stdout/stderr (musi być TTY)
+    try:
+        subprocess.run(cmd, **kwargs, check=False)
+    except FileNotFoundError:
+        fallback = ["ls"]
+        if tty_fd is not None:
+            subprocess.run(fallback, cwd=os.getcwd(), stdout=tty_fd, stderr=tty_fd, check=False)
+        else:
+            subprocess.run(fallback, cwd=os.getcwd(), check=False)
+
+def run_ls_and_count():
+    """Uruchamia lsd na TTY; zwraca liczbę wizualnych linii."""
+    tty_path = resolve_tty_path()
+    before = None
+    fd = None
+    if tty_path:
+        try:
+            fd = os.open(tty_path, os.O_RDWR | os.O_NOCTTY)
+            before = query_cursor_pos(fd)
+        except Exception:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+                fd = None
+
+    try:
+        if fd is not None:
+            run_lsd_to_tty(tty_fd=fd)
+        elif sys.stdout.isatty():
+            run_lsd_to_tty(tty_fd=None)
+        else:
+            # Ostateczność: pipe (bez siatki)
+            out = subprocess.check_output(
+                ["lsd", "--color", "always", "--icon", "always"],
+                cwd=os.getcwd(),
+                stderr=subprocess.DEVNULL,
+            )
+            sys.stdout.buffer.write(out)
+            if out and not out.endswith(b"\n"):
+                sys.stdout.buffer.write(b"\n")
+                out += b"\n"
+            sys.stdout.buffer.flush()
+            return out.count(b"\n")
+    finally:
+        after = None
+        if fd is not None:
+            try:
+                after = query_cursor_pos(fd)
+            except Exception:
+                pass
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+
+    if before and after:
+        return max(0, after[0] - before[0])
+    return 0
+
+def layout_still_stable(tty_path, start_row, height, ls_lines, expected_prompt_row, term_rows_at_start):
+    """
+    True = wolno nadpisać blok w miejscu.
+    False = terminal się zescrollował / zmienił rozmiar / prompt nie jest tam gdzie był
+            → pomiń update (zostaw cache na ekranie).
+    """
+    try:
+        term_rows = os.get_terminal_size().lines
+    except Exception:
+        term_rows = term_rows_at_start
+
+    # Zmiana wysokości okna albo blok już nie mieści się na ekranie
+    if term_rows_at_start and abs(term_rows - term_rows_at_start) > 1:
+        return False
+    if start_row + height + ls_lines > term_rows:
+        return False
+
+    fd = None
+    try:
+        fd = os.open(tty_path, os.O_RDWR | os.O_NOCTTY)
+        pos = query_cursor_pos(fd)
+    except Exception:
+        return False
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+
+    if not pos:
+        return False
+
+    row, _col = pos
+
+    # Kursor powinien być w okolicy promptu (pod ls), nie wyżej w raporcie
+    if row < start_row + height:
+        return False
+
+    # Zescrollowanie / dodatkowy output / clear → prompt w innym rzędzie
+    if expected_prompt_row > 0 and abs(row - expected_prompt_row) > 3:
+        return False
+
+    return True
+
+def replace_report_inplace(tty_path, start_row, height, new_lines):
+    """Nadpisuje blok raportu od start_row (1-indexed), dokładnie height linii."""
+    new_lines = pad_lines(new_lines, height)
+    fd = os.open(tty_path, os.O_WRONLY | os.O_NOCTTY)
+    try:
+        # Zapisz kursor użytkownika bez czytania z TTY (nie kradnie znaków z klawiatury)
+        os.write(fd, b"\x1b7")
+        os.write(fd, f"\x1b[{start_row};1H".encode("ascii"))
+        for line in new_lines:
+            os.write(fd, b"\r\x1b[2K")
+            os.write(fd, line.encode("utf-8", errors="replace"))
+            os.write(fd, b"\n")
+        os.write(fd, b"\x1b8")
+    finally:
+        os.close(fd)
+
+def write_lines_to_fd(fd, lines):
+    for line in lines:
+        os.write(fd, line.encode("utf-8", errors="replace"))
+        os.write(fd, b"\n")
+
+def redraw_full_and_nudge_shell(tty_path, new_lines, shell_pid):
+    """Gdy raport nie mieści się w oknie: wyczyść ekran, wypisz wszystko od zera, odśwież prompt."""
+    fd = os.open(tty_path, os.O_RDWR | os.O_NOCTTY)
+    try:
+        os.write(fd, b"\x1b[H\x1b[2J")
+        write_lines_to_fd(fd, new_lines)
+        run_lsd_to_tty(tty_fd=fd)
+    finally:
+        os.close(fd)
+    if shell_pid > 0:
+        try:
+            os.kill(shell_pid, signal.SIGUSR1)
+        except Exception:
+            pass
+
+def run_startup():
+    """
+    Placeholder/cache od razu; odświeżenie w tle nadpisuje ten sam blok.
+    Czyści ekran na starcie, żeby layout był przewidywalny.
+    """
+    claude_res, cursor_res, codex_res, agy_res = load_startup_snapshot()
+    has_any_cache = any([
+        not (claude_res or {}).get("placeholder"),
+        not (cursor_res or {}).get("placeholder"),
+        not (codex_res or {}).get("placeholder"),
+        any(not (agy_res.get(n) or {}).get("placeholder") for n in ("agy", "agy2", "agy3")),
+    ])
+    subtitle = "· cache · odświeżanie…" if has_any_cache else "· ładowanie…"
+    report = capture_report(
+        claude_res, cursor_res, codex_res, agy_res,
+        filter_target="all",
+        subtitle=subtitle,
+        show_hint=False,
+        refreshing_note="Odświeżanie w tle… możesz już pisać",
+        tight=True,
+    )
+    lines = text_to_lines(report)
+    # Mały zapas gdy świeży raport ma o 1–2 linie więcej (timeline itd.)
+    height = len(lines) + 2
+    lines = pad_lines(lines, height)
+
+    tty_path = resolve_tty_path() or ""
+
+    # Czysty ekran → raport zawsze zaczyna się w rzędzie 1 (bez rozjazdu przez scroll)
+    sys.stdout.buffer.write(b"\x1b[H\x1b[2J")
+    sys.stdout.buffer.flush()
+    start_row = 1
+
+    print_lines(lines)
+    ls_lines = run_ls_and_count()
+
+    try:
+        term_rows = os.get_terminal_size(sys.stdout.fileno()).lines
+    except Exception:
+        term_rows = 40
+    fits = (height + ls_lines + 3) <= term_rows
+
+    # Rzeczywisty rząd promptu (po ls) — do późniejszego sprawdzenia scrolla
+    expected_prompt_row = start_row + height + ls_lines
+    if tty_path:
+        fd = None
+        try:
+            fd = os.open(tty_path, os.O_RDWR | os.O_NOCTTY)
+            pos = query_cursor_pos(fd)
+            if pos:
+                expected_prompt_row = pos[0]
+        except Exception:
+            pass
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+
+    env = os.environ.copy()
+    env["LIMITS_START_ROW"] = str(start_row)
+    env["LIMITS_REPORT_LINES"] = str(height)
+    env["LIMITS_LS_LINES"] = str(ls_lines)
+    env["LIMITS_FITS"] = "1" if fits else "0"
+    env["LIMITS_SHELL_PID"] = str(os.getppid())
+    env["LIMITS_CWD"] = os.getcwd()
+    env["LIMITS_EXPECTED_ROW"] = str(expected_prompt_row)
+    env["LIMITS_TERM_ROWS"] = str(term_rows)
+    if tty_path:
+        env["LIMITS_TTY"] = tty_path
+
+    try:
+        subprocess.Popen(
+            [sys.executable, SCRIPT_PATH, "--startup-refresh"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            env=env,
+        )
+    except Exception:
+        sys.stdout.buffer.write(
+            f"{DIM}(nie udało się uruchomić odświeżania w tle){RESET}\n".encode("utf-8")
+        )
+
+def run_startup_refresh():
+    """Pobiera świeże dane i wkleja je w miejsce wcześniejszego bloku raportu."""
+    try:
+        height = int(os.environ.get("LIMITS_REPORT_LINES", "0"))
+        start_row = int(os.environ.get("LIMITS_START_ROW", "1"))
+        ls_lines = int(os.environ.get("LIMITS_LS_LINES", "0"))
+        fits = os.environ.get("LIMITS_FITS", "1") == "1"
+        shell_pid = int(os.environ.get("LIMITS_SHELL_PID", "0"))
+        expected_row = int(os.environ.get("LIMITS_EXPECTED_ROW", "0"))
+        term_rows_at_start = int(os.environ.get("LIMITS_TERM_ROWS", "0"))
+        tty_path = os.environ.get("LIMITS_TTY") or resolve_tty_path()
+        cwd = os.environ.get("LIMITS_CWD")
+        if cwd:
+            try:
+                os.chdir(cwd)
+            except Exception:
+                pass
+        if not tty_path or height <= 0:
+            return
+
+        claude_res, cursor_res, codex_res, agy_res = fetch_all_live(
+            filter_target="all", force_agy_refresh=True
+        )
+        report = capture_report(
+            claude_res, cursor_res, codex_res, agy_res,
+            filter_target="all",
+            subtitle="· świeże",
+            show_hint=False,
+            refreshing_note="Zaktualizowano",
+            tight=True,
+        )
+        new_lines = pad_lines(text_to_lines(report), height)
+
+        # Jeśli użytkownik zescrollował / coś dopisał / zmienił okno — nie ruszaj ekranu
+        if not layout_still_stable(
+            tty_path, start_row, height, ls_lines, expected_row, term_rows_at_start
+        ):
+            return
+
+        if fits:
+            replace_report_inplace(tty_path, start_row, height, new_lines)
+        else:
+            redraw_full_and_nudge_shell(tty_path, new_lines, shell_pid)
+    except Exception:
+        pass
+
+def main():
+    parser = argparse.ArgumentParser(description="Sprawdź pozostałe limity dla agentów (Cursor, Claude, Codex, Antigravity)")
+    parser.add_argument("agent", nargs="?", default="all", help="Opcjonalny filtr: agent (cursor), claude, codex, agy, agy2, agy3, agy-all")
+    parser.add_argument("-r", "--refresh", action="store_true", help="Wymuś odświeżenie limitów Google Antigravity")
+    parser.add_argument("-f", "--fast", action="store_true", help="Pomiń probe Antigravity (zostaw cache). Claude, Cursor i Codex i tak idą z API")
+    parser.add_argument("--startup", action="store_true", help="Tryb startowy: placeholder/cache od razu, odświeżenie w tle w miejscu")
+    parser.add_argument("--startup-refresh", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--json", action="store_true", help="Zwróć dane w formacie JSON")
+    args = parser.parse_args()
+
+    if args.startup_refresh:
+        run_startup_refresh()
+        return
+
+    if args.startup:
+        run_startup()
+        return
+
+    filter_target = (args.agent or "all").lower()
+
+    should_fetch_claude = filter_target in ("all", "claude")
+    should_fetch_cursor = filter_target in ("all", "agent", "cursor")
+    should_fetch_codex = filter_target in ("all", "codex", "openai")
+    should_fetch_agy = filter_target in ("all", "agy", "agy2", "agy3", "agy-all", "google")
+
+    if args.fast and not args.refresh:
+        # -r przy -f nadal wymusza probe agy; sam -f odświeża tylko HTTP.
+        claude_res, cursor_res, codex_res, agy_res = fetch_all_live(
+            filter_target=filter_target,
+            force_agy_refresh=False,
+            skip_agy_probe=True,
+        )
+    else:
+        claude_res, cursor_res, codex_res, agy_res = fetch_all_live(
+            filter_target=filter_target,
+            force_agy_refresh=args.refresh or not args.fast,
+        )
+        if not should_fetch_claude:
+            claude_res = None
+        if not should_fetch_cursor:
+            cursor_res = None
+        if not should_fetch_codex:
+            codex_res = None
+        if not should_fetch_agy:
+            agy_res = {}
+
+    if args.json:
+        full_json = {}
+        if cursor_res:
+            full_json["agent"] = cursor_res
+        if claude_res:
+            full_json["claude"] = claude_res
+        if codex_res:
+            full_json["codex"] = codex_res
+        for k in ("agy", "agy2", "agy3"):
+            if k in (agy_res or {}):
+                full_json[k] = agy_res[k]
+        print(json.dumps(full_json, indent=2, default=str))
+        return
+
+    render_report(claude_res, cursor_res, codex_res, agy_res or {}, filter_target=filter_target)
+
+if __name__ == "__main__":
+    main()
