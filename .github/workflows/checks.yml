@@ -1,0 +1,30 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install linters
+        run: brew install shellcheck age
+      - name: shellcheck
+        run: |
+          shellcheck -x install.sh bin/mac-update bin/mac-cleanup bin/install-cli \
+              bin/mac-backup bin/lib/maintenance.sh claude/statusline.sh \
+              claude/hooks/skill-statusline.sh
+      - name: Syntax
+        run: |
+          bash -n install.sh bin/mac-update bin/mac-cleanup bin/install-cli \
+              bin/mac-backup claude/statusline.sh claude/hooks/skill-statusline.sh
+          zsh -n zsh/.zshrc zsh/.zprofile
+          plutil -lint launchd/*.plist
+          python3 -m py_compile bin/limits bin/mac-settings antigravity/statusline.py
+      - name: Regression tests
+        run: python3 -m unittest discover -s tests -v
