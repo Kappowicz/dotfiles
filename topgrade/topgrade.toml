@@ -6,14 +6,21 @@
 
 [misc]
 # Steps that want sudo, a reboot, or would pull your repositories unattended.
-disable = ["system", "firmware", "restarts", "git_repos"]
+# "cursor" updates Cursor IDE extensions; only the Cursor Agent CLI is installed.
+disable = ["system", "firmware", "restarts", "git_repos", "android_studio", "cursor"]
 
-# Show why a step was skipped instead of silently dropping it.
-show_skipped = true
+# Hide routine skipped steps; failures still appear in the summary.
+show_skipped = false
 
 # Only bother me when something actually failed.
 notify_end = "on_failure"
 
+# Run cleanup steps (e.g. brew cleanup) after upgrading.
+cleanup = true
+
 [brew]
 # Remove formulae that are no longer depended on after upgrading.
 autoremove = true
+
+[commands]
+"Android Studio Plugins" = '"/Applications/Android Studio.app/Contents/MacOS/studio" update'

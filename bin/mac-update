@@ -6,90 +6,160 @@
 # A missed slot (asleep, low battery) costs a day, not the whole cycle.
 #
 #   mac-update              # normal run, with gates
-#   mac-update --force      # skip the gates
+#   mac-update --force      # skip the gates; from a terminal it also offers
+#                           # pinned casks + App Store in one sudo question
 #   mac-update --dry-run    # print what would happen, change nothing
 #
 # Steps left disabled on purpose:
 #   system, firmware, restarts  — want sudo or a reboot, not for background use
 #   git_repos                   — would pull your repositories unattended
+#   mas                         — mas upgrade needs root; pending App Store
+#                                 updates are listed and notified instead
 set -uo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+  LINK=$(readlink "$SCRIPT_PATH")
+  case "$LINK" in /*) SCRIPT_PATH="$LINK" ;; *) SCRIPT_PATH="$(dirname "$SCRIPT_PATH")/$LINK" ;; esac
+done
+JOB=update
+# shellcheck source=bin/lib/maintenance.sh
+source "$(dirname "$SCRIPT_PATH")/lib/maintenance.sh" || {
+  echo "Cannot load lib/maintenance.sh — refusing to run without the build check." >&2
+  exit 1
+}
 
 # --- settings ---------------------------------------------------------------
 # Casks to hold back, space separated. Useful when a toolchain version is
 # pinned by a project's CI and a silent bump would make local builds diverge
-# from what CI checks. Upgrade those deliberately: brew upgrade --cask <name>
-SKIP_CASKS="${SKIP_CASKS:-}"
+# from what CI checks, or when a cask's installer/uninstaller requires an
+# interactive sudo prompt and manages its own updates.
+# Upgrade those deliberately: brew upgrade --cask <name>, or mac-update --force
+# in a terminal, which offers them all in one question.
+SKIP_CASKS="${SKIP_CASKS:-steam tailscale-app microsoft-teams}"
 
-# Runs on AC, or on battery above BATTERY_MIN percent. The point of the gate is
-# not to spend a long unplugged session on background work; a nearly full
-# battery is no reason to skip.
-BATTERY_MIN="${BATTERY_MIN:-65}"
+parse_args "$@"
+log_header
+gates_ok || exit 0
+if [ "$DRY" -eq 0 ]; then
+  acquire_lock || exit 0
+  # Updating a toolchain mid-build ends badly. Harmless under --dry-run, since
+  # nothing changes there anyway.
+  if build_running; then busy_exit "Build in progress"; fi
+fi
 
-power_ok() {
-  pmset -g ps | grep -q 'AC Power' && return 0
-  BATTERY_PCT=$(pmset -g batt | grep -Eo '[0-9]{1,3}%' | head -1 | tr -d '%')
-  [ -n "$BATTERY_PCT" ] && [ "$BATTERY_PCT" -gt "$BATTERY_MIN" ]
+ask() { # ask <question> — yes only on an explicit y
+  local reply
+  read -r -p "  $1 [y/N] " reply </dev/tty || return 1
+  case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
 }
-
-STAMP="$HOME/.local/state/mac-update.last"
-INTERVAL=$((6 * 86400 + 43200))   # 6.5 days, leaves room for daily jitter
-
-DRY=0
-FORCE=0
-for a in "$@"; do
-  case "$a" in
-    --dry-run|-n) DRY=1 ;;
-    --force|-f)   FORCE=1 ;;
-    *) printf 'Unknown argument: %s\n' "$a" >&2; exit 2 ;;
-  esac
-done
-
-mkdir -p "$(dirname "$STAMP")"
-
-if [ "$FORCE" -eq 0 ] && [ "$DRY" -eq 0 ]; then
-  if ! power_ok; then
-    printf 'On battery at %s%% (need >%s%%) — skipping, will retry tomorrow.\n' \
-      "${BATTERY_PCT:-?}" "$BATTERY_MIN"
-    exit 0
-  fi
-  if [ -f "$STAMP" ]; then
-    elapsed=$(( $(date +%s) - $(stat -f %m "$STAMP") ))
-    if [ "$elapsed" -lt "$INTERVAL" ]; then
-      printf 'Last update %d days ago — too soon.\n' $((elapsed / 86400)); exit 0
-    fi
-  fi
-fi
-
-# Updating a toolchain mid-build ends badly. Harmless under --dry-run, since
-# nothing changes there anyway.
-if [ "$DRY" -eq 0 ] \
-   && pgrep -f 'flutter_tools.snapshot|flutter_tester|GradleDaemon' >/dev/null 2>&1; then
-  echo "Build in progress — not updating. Back tomorrow."; exit 0
-fi
+OFFER_SUDO=0
+if [ "$FORCE" -eq 1 ] && [ "$INTERACTIVE" -eq 1 ] && [ "$DRY" -eq 0 ]; then OFFER_SUDO=1; fi
 
 # --- casks, one at a time ---------------------------------------------------
-printf '\n\033[1m> Applications (brew --cask)\033[0m\n'
-brew list --cask 2>/dev/null | while IFS= read -r c; do
-  case " $SKIP_CASKS " in *" $c "*) printf '\033[33m  - %s (pinned)\033[0m\n' "$c"; continue ;; esac
+# Refresh Homebrew once, then ask it what is outdated, so each cask call below
+# does not auto-update again and up-to-date apps are not touched at all.
+# --greedy-auto-updates matches what naming a cask explicitly used to upgrade.
+b "Applications (brew --cask)"
+FAILED=0
+if [ "$DRY" -eq 0 ]; then
+  brew update --quiet </dev/null || FAILED=1
+fi
+export HOMEBREW_NO_AUTO_UPDATE=1
+if ! OUTDATED=$(brew outdated --cask --greedy-auto-updates --quiet </dev/null); then
+  err "could not list outdated applications"
+  exit 1
+fi
+if [ -z "$OUTDATED" ]; then sk "all up to date"; fi
+PINNED=""
+while IFS= read -r c; do
+  [ -n "$c" ] || continue
+  case " $SKIP_CASKS " in
+    *" $c "*|*" ${c##*/} "*)
+      sk "$c (pinned, update available)"
+      PINNED="$PINNED $c"
+      continue ;;
+  esac
   if [ "$DRY" -eq 1 ]; then
     printf '    brew upgrade --cask %s\n' "$c"
+  elif brew upgrade --cask "$c" </dev/null; then
+    # Keep diagnostics in the launchd log and continue after individual failures.
+    ok "$c"
   else
-    # Individually, so one cask asking for a password cannot block the rest.
-    brew upgrade --cask "$c" >/dev/null 2>&1 \
-      && printf '\033[32m  + %s\033[0m\n' "$c" \
-      || printf '\033[33m  - %s (skipped)\033[0m\n' "$c"
+    err "$c (failed)"
+    FAILED=1
   fi
-done
+done <<< "$OUTDATED"
+
+# --- App Store: list --------------------------------------------------------
+# mas upgrade needs root, so it cannot run unattended. List what is pending.
+MAS_PENDING=0
+if command -v mas >/dev/null 2>&1; then
+  b "App Store (mas)"
+  if MAS_OUT=$(mas outdated 2>/dev/null) && [ -n "$MAS_OUT" ]; then
+    printf '%s\n' "$MAS_OUT" | sed 's/^/    /'
+    MAS_PENDING=$(printf '%s\n' "$MAS_OUT" | grep -c .)
+  else
+    echo "  Up to date (or not signed in to the App Store)."
+  fi
+fi
+
+# --- the sudo part: one question, one password ------------------------------
+# From a terminal with --force, offer everything that needs root at once.
+# Every brew process starts with `sudo --reset-timestamp` (Homebrew does this
+# on purpose, see Library/Homebrew/utils/sudo.sh), so a password typed before
+# brew, or for a previous brew call, is thrown away. Hence all pinned casks go
+# through ONE brew call: the password asked there is cached for the rest of
+# that call, and still valid for `sudo mas upgrade` right after. A background
+# loop refreshes the cached ticket so a long install does not outlive it.
+SUDO_DONE=0
+if [ "$OFFER_SUDO" -eq 1 ] && { [ -n "$PINNED" ] || [ "$MAS_PENDING" -gt 0 ]; }; then
+  b "Needs sudo"
+  [ -n "$PINNED" ] && printf '    pinned casks:%s\n' "$PINNED"
+  [ "$MAS_PENDING" -gt 0 ] && printf '    App Store updates: %s\n' "$MAS_PENDING"
+  if ask "Upgrade these now (one sudo password)?"; then
+    SUDO_DONE=1
+    ( while kill -0 "$$" 2>/dev/null; do sudo -n true 2>/dev/null; sleep 50; done ) &
+    SUDO_KEEPALIVE=$!
+    disown "$SUDO_KEEPALIVE" 2>/dev/null   # no "Terminated" line when it stops
+    trap 'kill "$SUDO_KEEPALIVE" 2>/dev/null; rm -f "$LOCK"' EXIT
+    if [ -n "$PINNED" ]; then
+      # shellcheck disable=SC2086  # PINNED is a space-separated list of names
+      brew upgrade --cask $PINNED || FAILED=1
+      # brew carries on past a failed cask; ask it which ones are still behind.
+      STILL=$(brew outdated --cask --greedy-auto-updates --quiet </dev/null) || STILL="$PINNED"
+      for c in $PINNED; do
+        case " $(printf '%s' "$STILL" | tr '\n' ' ') " in
+          *" $c "*) err "$c (failed)"; FAILED=1 ;;
+          *) ok "$c" ;;
+        esac
+      done
+    fi
+    if [ "$MAS_PENDING" -gt 0 ]; then
+      if sudo mas upgrade; then ok "App Store apps"; else err "mas upgrade (failed)"; FAILED=1; fi
+    fi
+  else
+    sk "skipped"
+  fi
+fi
+if [ "$MAS_PENDING" -gt 0 ] && [ "$SUDO_DONE" -eq 0 ]; then
+  echo "  App Store: run sudo mas upgrade"
+  if [ "$DRY" -eq 0 ] && [ "$INTERACTIVE" -eq 0 ]; then
+    osascript -e 'display notification "Run: sudo mas upgrade" with title "App Store updates pending"' >/dev/null 2>&1 || true
+  fi
+fi
 
 # --- everything else via topgrade -------------------------------------------
-printf '\n\033[1m> topgrade\033[0m\n'
-ARGS="--no-self-update --no-ask-retry --disable system firmware restarts git_repos brew_cask"
+b "topgrade"
+ARGS=(--no-self-update --no-ask-retry --disable system firmware restarts git_repos brew_cask mas)
 if [ "$DRY" -eq 1 ]; then
-  # shellcheck disable=SC2086
-  topgrade --dry-run $ARGS
-else
-  # shellcheck disable=SC2086
-  topgrade --yes $ARGS
+  topgrade --dry-run "${ARGS[@]}"
+  exit 0
+fi
+if ! topgrade --yes "${ARGS[@]}" </dev/null; then FAILED=1; fi
+if [ "$FAILED" -eq 0 ]; then
   touch "$STAMP"
+else
+  echo "Update incomplete; no success stamp written. Will retry tomorrow." >&2
+  exit 1
 fi

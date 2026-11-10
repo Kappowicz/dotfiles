@@ -16,101 +16,117 @@
 # large, both are painfully slow to rebuild. Commands for those at the bottom.
 set -uo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+  LINK=$(readlink "$SCRIPT_PATH")
+  case "$LINK" in /*) SCRIPT_PATH="$LINK" ;; *) SCRIPT_PATH="$(dirname "$SCRIPT_PATH")/$LINK" ;; esac
+done
+JOB=cleanup
+# shellcheck source=bin/lib/maintenance.sh
+source "$(dirname "$SCRIPT_PATH")/lib/maintenance.sh" || {
+  echo "Cannot load lib/maintenance.sh — refusing to run without the build check." >&2
+  exit 1
+}
+FAILED=0
 
 # --- settings ---------------------------------------------------------------
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/Projects}"   # where your checkouts live
 KEEP_BUILD_CONFIGS=8                             # Flutter build dirs to keep
 STALE_DAYS=30                                    # caches untouched this long
 
-# Runs on AC, or on battery above BATTERY_MIN percent. The point of the gate is
-# not to spend a long unplugged session on background work; a nearly full
-# battery is no reason to skip.
-BATTERY_MIN="${BATTERY_MIN:-65}"
-
-power_ok() {
-  pmset -g ps | grep -q 'AC Power' && return 0
-  BATTERY_PCT=$(pmset -g batt | grep -Eo '[0-9]{1,3}%' | head -1 | tr -d '%')
-  [ -n "$BATTERY_PCT" ] && [ "$BATTERY_PCT" -gt "$BATTERY_MIN" ]
-}
-
-STAMP="$HOME/.local/state/mac-cleanup.last"
-INTERVAL=$((6 * 86400 + 43200))   # 6.5 days, leaves room for daily jitter
-
-DRY=0
-FORCE=0
-for a in "$@"; do
-  case "$a" in
-    --dry-run|-n) DRY=1 ;;
-    --force|-f)   FORCE=1 ;;
-    *) printf 'Unknown argument: %s\n' "$a" >&2; exit 2 ;;
-  esac
-done
-
-mkdir -p "$(dirname "$STAMP")"
-
-b()  { printf '\n\033[1m> %s\033[0m\n' "$1"; }
-ok() { printf '\033[32m  + %s\033[0m\n' "$1"; }
-sk() { printf '\033[33m  - %s\033[0m\n' "$1"; }
-
-# --- gates ------------------------------------------------------------------
-if [ "$FORCE" -eq 0 ] && [ "$DRY" -eq 0 ]; then
-  if ! power_ok; then
-    printf 'On battery at %s%% (need >%s%%) — skipping, will retry tomorrow.\n' \
-      "${BATTERY_PCT:-?}" "$BATTERY_MIN"
-    exit 0
-  fi
-  if [ -f "$STAMP" ]; then
-    elapsed=$(( $(date +%s) - $(stat -f %m "$STAMP") ))
-    if [ "$elapsed" -lt "$INTERVAL" ]; then
-      printf 'Last cleanup %d days ago — too soon.\n' $((elapsed / 86400)); exit 0
-    fi
-  fi
-fi
-
-# A running build means the directories to remove are in use right now.
-# Harmless under --dry-run, since nothing disappears there anyway.
-if [ "$DRY" -eq 0 ] \
-   && pgrep -f 'flutter_tools.snapshot|flutter_tester|GradleDaemon|qemu-system' >/dev/null 2>&1; then
-  echo "Build or emulator running — touching nothing. Back tomorrow."; exit 0
+parse_args "$@"
+log_header
+gates_ok || exit 0
+if [ "$DRY" -eq 0 ]; then
+  acquire_lock || exit 0
+  # A running build means the directories to remove are in use right now.
+  # Harmless under --dry-run, since nothing disappears there anyway.
+  if build_running; then busy_exit "Build in progress"; fi
+  if pgrep -f 'qemu-system' >/dev/null 2>&1; then busy_exit "Emulator running"; fi
 fi
 
 free_kb() { df -k / | awk 'NR==2 {print $4}'; }
 BEFORE=$(free_kb)
 
+# Both return non-zero on failure, so callers count only what really went.
 drop() { # drop <path> — one at a time, so it can be counted and logged
-  if [ "$DRY" -eq 1 ]; then printf '    %s\n' "$1"; else rm -rf "$1"; fi
+  if [ "$DRY" -eq 1 ]; then
+    printf '    %s\n' "$1"
+  elif ! rm -rf "$1"; then
+    FAILED=1
+    return 1
+  fi
 }
 
 to_trash() { # safer than rm for things out of ~/Downloads
   local target
   target="$HOME/.Trash/$(basename "$1")"
-  [ -e "$target" ] && target="$target.$(date +%s)"
-  if [ "$DRY" -eq 1 ]; then printf '    %s -> Trash\n' "$1"; else mv "$1" "$target"; fi
+  while [ -e "$target" ] || [ -L "$target" ]; do target="$target.1"; done
+  if [ "$DRY" -eq 1 ]; then
+    printf '    %s -> Trash\n' "$1"
+  elif ! mkdir -p "$HOME/.Trash" || ! mv "$1" "$target"; then
+    FAILED=1
+    return 1
+  fi
 }
 
 # --- 1. Homebrew ------------------------------------------------------------
 b "Homebrew"
 if [ "$DRY" -eq 1 ]; then
-  brew cleanup --dry-run 2>&1 | tail -3
+  brew cleanup -s --prune=all --dry-run || FAILED=1
 else
-  brew cleanup -s --prune=30 >/dev/null 2>&1 && ok "cache cleared"
+  if brew cleanup -s --prune=all; then ok "cache cleared"; else FAILED=1; fi
 fi
 
 # --- 2. Gradle --------------------------------------------------------------
-# The same rule Gradle's own cache eviction uses — except that one rarely runs,
-# because the daemon seldom exits cleanly.
+# Remove module versions none of whose files were read in STALE_DAYS, as whole
+# files-2.1/<group>/<module>/<version> directories — the unit Gradle's own
+# cleanup removes, so no half-deleted versions are left behind. Daemon logs by
+# age. Transforms are left to Gradle.
 b "Gradle"
+GRADLE_FILES="$HOME/.gradle/caches/modules-2/files-2.1"
 n=0
-while IFS= read -r -d '' p; do drop "$p"; n=$((n + 1)); done < <(
-  find "$HOME/.gradle/caches/modules-2" -type f -atime +$STALE_DAYS -print0 2>/dev/null
+while IFS= read -r -d '' p; do drop "$p" && n=$((n + 1)); done < <(
+  python3 - "$GRADLE_FILES" "$STALE_DAYS" <<'PY'
+import os
+import sys
+import time
+
+root, days = sys.argv[1], int(sys.argv[2])
+cutoff = time.time() - days * 86400
+
+
+def subdirs(path):
+    return [e.path for e in os.scandir(path) if e.is_dir(follow_symlinks=False)]
+
+
+def last_read(path):
+    newest = 0.0
+    for dirpath, _, files in os.walk(path):
+        for f in files:
+            try:
+                newest = max(newest, os.lstat(os.path.join(dirpath, f)).st_atime)
+            except OSError:
+                return time.time()  # unreadable: treat as in use
+    return newest
+
+
+if os.path.isdir(root):
+    for group in subdirs(root):
+        for module in subdirs(group):
+            for version in subdirs(module):
+                if last_read(version) < cutoff:
+                    sys.stdout.buffer.write(os.fsencode(version) + b"\0")
+PY
 )
-while IFS= read -r -d '' p; do drop "$p"; n=$((n + 1)); done < <(
-  find "$HOME/.gradle/caches"/*/transforms -mindepth 1 -maxdepth 1 -type d -atime +$STALE_DAYS -print0 2>/dev/null
-)
-while IFS= read -r -d '' p; do drop "$p"; n=$((n + 1)); done < <(
+# Modules (and groups) whose last version just went.
+if [ "$DRY" -eq 0 ] && [ -d "$GRADLE_FILES" ]; then
+  find "$GRADLE_FILES" -mindepth 1 -maxdepth 2 -type d -empty -delete 2>/dev/null
+fi
+while IFS= read -r -d '' p; do drop "$p" && n=$((n + 1)); done < <(
   find "$HOME/.gradle/daemon" -type f -name '*.log' -mtime +$STALE_DAYS -print0 2>/dev/null
 )
-[ "$n" -gt 0 ] && ok "unused entries (>$STALE_DAYS days): $n" || sk "nothing older than $STALE_DAYS days"
+if [ "$n" -gt 0 ]; then ok "unused module versions and logs (>$STALE_DAYS days): $n"; else sk "nothing older than $STALE_DAYS days"; fi
 
 # --- 3. Flutter: stale build configurations ---------------------------------
 # .dart_tool/flutter_build keeps one directory per build configuration and
@@ -121,54 +137,116 @@ n=0
 while IFS= read -r -d '' pubspec; do
   fb="$(dirname "$pubspec")/.dart_tool/flutter_build"
   [ -d "$fb" ] || continue
-  while IFS= read -r p; do drop "$p"; n=$((n + 1)); done < <(
-    ls -dt "$fb"/*/ 2>/dev/null | tail -n +$((KEEP_BUILD_CONFIGS + 1))
+  while IFS= read -r -d '' p; do drop "$p" && n=$((n + 1)); done < <(
+    python3 - "$fb" "$KEEP_BUILD_CONFIGS" <<'PY'
+import os
+import pathlib
+import sys
+root = pathlib.Path(sys.argv[1])
+entries = [p for p in root.iterdir() if p.is_dir() and not p.is_symlink()]
+entries.sort(key=lambda p: (p.stat().st_mtime_ns, p.name), reverse=True)
+for p in entries[int(sys.argv[2]):]:
+    sys.stdout.buffer.write(os.fsencode(p) + b'\0')
+PY
   )
 done < <(find "$PROJECTS_DIR" -maxdepth 2 -name pubspec.yaml -print0 2>/dev/null)
-[ "$n" -gt 0 ] && ok "directories removed: $n" || sk "nothing to remove"
+if [ "$n" -gt 0 ]; then ok "directories selected: $n"; else sk "nothing to remove"; fi
 
 # --- 4. DevTools dumps in Downloads -----------------------------------------
 b "DevTools dumps"
 n=0
-while IFS= read -r -d '' p; do to_trash "$p"; n=$((n + 1)); done < <(
+while IFS= read -r -d '' p; do to_trash "$p" && n=$((n + 1)); done < <(
   find "$HOME/Downloads" -maxdepth 1 -name 'dart_devtools_*' -mtime +7 -print0 2>/dev/null
 )
-[ "$n" -gt 0 ] && ok "moved to Trash: $n" || sk "none older than 7 days"
+if [ "$n" -gt 0 ]; then ok "selected for Trash: $n"; else sk "none older than 7 days"; fi
 
 # --- 5. Emulator snapshots --------------------------------------------------
 # Costs one cold boot (~a minute) next time the emulator starts. That is all.
 b "Emulator snapshots"
 n=0
-while IFS= read -r -d '' p; do drop "$p"; n=$((n + 1)); done < <(
+while IFS= read -r -d '' p; do drop "$p" && n=$((n + 1)); done < <(
   find "$HOME/.android/avd" -mindepth 3 -maxdepth 3 -type d -path '*/snapshots/*' -mtime +$STALE_DAYS -print0 2>/dev/null
 )
-[ "$n" -gt 0 ] && ok "snapshots (>$STALE_DAYS days): $n" || sk "none older than $STALE_DAYS days"
+if [ "$n" -gt 0 ]; then ok "snapshots (>$STALE_DAYS days): $n"; else sk "none older than $STALE_DAYS days"; fi
 
 # --- 6. Updater and pip caches ----------------------------------------------
 b "Updater caches"
 if pgrep -f Antigravity >/dev/null 2>&1; then
   sk "Antigravity is running — leaving its cache alone"
 else
-  drop "$HOME/Library/Caches/com.google.antigravity.ShipIt"
-  drop "$HOME/Library/Caches/antigravity-updater"
-  ok "Antigravity installer leftovers"
+  n=0
+  for p in "$HOME/Library/Caches/com.google.antigravity.ShipIt" \
+           "$HOME/Library/Caches/antigravity-updater"; do
+    if [ -e "$p" ] || [ -L "$p" ]; then drop "$p" && n=$((n + 1)); fi
+  done
+  if [ "$n" -gt 0 ]; then ok "Antigravity installer leftovers: $n"; else sk "no Antigravity leftovers"; fi
 fi
-if [ "$DRY" -eq 0 ] && command -v pip3 >/dev/null 2>&1; then
-  pip3 cache purge >/dev/null 2>&1 && ok "pip cache"
+if command -v pip3 >/dev/null 2>&1; then
+  if [ "$DRY" -eq 1 ]; then
+    printf '    pip3 cache purge  (%s)\n' "$(pip3 cache dir 2>/dev/null || echo 'cache dir unknown')"
+  elif pip3 cache purge; then
+    ok "pip cache"
+  else
+    FAILED=1
+  fi
 fi
+
+# --- 7. Old agent CLI versions ----------------------------------------------
+# Keep the currently linked release (plus the newest mtime entry as a safety
+# fallback) for Claude Code, Cursor Agent and Codex app-server-daemon.
+b "Agent CLI versions"
+n=0
+while IFS= read -r -d '' p; do drop "$p" && n=$((n + 1)); done < <(
+  python3 - "$HOME" <<'PY'
+import os
+import pathlib
+import sys
+
+home = pathlib.Path(sys.argv[1])
+targets = [
+    (home / ".local/share/claude/versions", home / ".local/bin/claude", False),
+    (home / ".local/share/cursor-agent/versions", home / ".local/bin/agent", True),
+    (home / ".codex/packages/app-server-daemon/releases", home / ".codex/packages/app-server-daemon/current", False),
+]
+for versions_dir, link_path, use_parent in targets:
+    if not versions_dir.is_dir():
+        continue
+    keep = set()
+    if link_path.is_symlink():
+        try:
+            resolved = link_path.resolve()
+            keep.add((resolved.parent if use_parent else resolved).name)
+        except OSError:
+            pass
+    entries = [p for p in versions_dir.iterdir() if not p.is_symlink()]
+    entries.sort(key=lambda p: (p.stat().st_mtime_ns, p.name), reverse=True)
+    # Always keep the newest entry and any symlinked active version.
+    for p in entries[:1]:
+        keep.add(p.name)
+    for p in entries:
+        if p.name not in keep:
+            sys.stdout.buffer.write(os.fsencode(p) + b"\0")
+PY
+)
+if [ "$n" -gt 0 ]; then ok "superseded versions: $n"; else sk "only active versions present"; fi
 
 # --- summary ----------------------------------------------------------------
 AFTER=$(free_kb)
 printf '\n'
 if [ "$DRY" -eq 1 ]; then
-  printf '\033[1mDry run — nothing removed.\033[0m\n'
+  printf '%sDry run — nothing removed.%s\n' "$C_B" "$C_0"
 else
-  touch "$STAMP"
-  awk -v a="$BEFORE" -v b="$AFTER" 'BEGIN {
-    printf "\033[1mReclaimed: %.1f GB\033[0m (free: %.1f GB)\n",
-           (b - a) / 1048576, b / 1048576
+  if [ "$FAILED" -eq 0 ]; then
+    touch "$STAMP"
+  else
+    echo "Cleanup incomplete; no success stamp written. Will retry tomorrow." >&2
+  fi
+  awk -v a="$BEFORE" -v b="$AFTER" -v on="$C_B" -v off="$C_0" 'BEGIN {
+    printf "%sReclaimed: %.1f GB%s (free: %.1f GB)\n",
+           on, (b - a) / 1048576, off, b / 1048576
   }'
 fi
+exit "$FAILED"
 
 # By hand, when you are genuinely out of space — not scheduled, because these
 # hurt:
