@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Export/apply an allowlist of macOS preferences, without accounts or app state."""
+import argparse
+import datetime
+import json
+import os
+import pathlib
+import plistlib
+import subprocess
+
+KEYS = {
+    "com.apple.dock": ["autohide", "tilesize", "orientation", "show-recents", "mru-spaces", "minimize-to-application", "mineffect"],
+    "com.apple.finder": ["AppleShowAllFiles", "ShowPathbar", "ShowStatusBar", "FXPreferredViewStyle", "FXDefaultSearchScope", "FXEnableExtensionChangeWarning"],
+    "NSGlobalDomain": ["AppleShowAllExtensions", "KeyRepeat", "InitialKeyRepeat", "NSAutomaticSpellingCorrectionEnabled", "NSAutomaticCapitalizationEnabled", "NSAutomaticDashSubstitutionEnabled", "NSAutomaticPeriodSubstitutionEnabled", "NSAutomaticQuoteSubstitutionEnabled", "com.apple.swipescrolldirection"],
+    "com.apple.screencapture": ["type", "disable-shadow"],
+    "com.apple.AppleMultitouchTrackpad": ["Clicking", "TrackpadThreeFingerDrag", "TrackpadRightClick"],
+    "com.apple.driver.AppleBluetoothMultitouch.trackpad": ["Clicking", "TrackpadThreeFingerDrag", "TrackpadRightClick"],
+    "com.knollsoft.Rectangle": ["allowAnyShortcut", "alternateDefaultShortcuts", "subsequentExecutionMode", "gapSize", "launchOnLogin", "toggleTodo"],
+}
+
+
+def read_domain(domain):
+    result = subprocess.run(["defaults", "export", domain, "-"], capture_output=True)
+    if result.returncode:
+        return {}, None
+    return plistlib.loads(result.stdout), result.stdout
+
+
+def valid_value(domain, key, value):
+    if domain == "com.knollsoft.Rectangle" and key == "toggleTodo":
+        return isinstance(value, dict) and set(value) == {"keyCode", "modifierFlags"} and all(type(v) is int for v in value.values())
+    return type(value) in (bool, int, str)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=["export", "apply"])
+    parser.add_argument("--file", type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[1] / "macos/settings.json")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    if args.action == "export":
+        data = {}
+        for domain, keys in KEYS.items():
+            current, _ = read_domain(domain)
+            data[domain] = {key: current[key] for key in keys if key in current and valid_value(domain, key, current[key])}
+        if args.dry_run:
+            print(json.dumps(data, indent=2))
+        else:
+            args.file.parent.mkdir(parents=True, exist_ok=True)
+            args.file.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            print(f"Exported preferences: {args.file}")
+        return
+
+    data = json.loads(args.file.read_text())
+    # Validate the entire snapshot before writing any preference.
+    for domain, values in data.items():
+        if domain not in KEYS or not isinstance(values, dict):
+            parser.error(f"Unsupported preference domain: {domain}")
+        for key, value in values.items():
+            if key not in KEYS[domain] or not valid_value(domain, key, value):
+                parser.error(f"Unsupported preference: {domain}/{key}")
+    backup = pathlib.Path.home() / ".local/state/dotfiles/preferences" / datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
+    for domain, values in data.items():
+        current, original = read_domain(domain)
+        changes = {key: value for key, value in values.items() if key not in current or type(current[key]) != type(value) or current[key] != value}
+        if changes and not args.dry_run:
+            backup.mkdir(parents=True, exist_ok=True, mode=0o700)
+            target = backup / f"{domain}.json"
+            target.write_text(json.dumps({key: current.get(key) for key in changes}, indent=2) + "\n")
+            target.chmod(0o600)
+            if original:
+                target = backup / f"{domain}.plist"
+                target.write_bytes(original)
+                target.chmod(0o600)
+        for key, value in changes.items():
+            print(f"{domain}: {key} = {value}")
+            if not args.dry_run:
+                if isinstance(value, dict):
+                    # defaults accepts XML property lists as structured values.
+                    write_args = [plistlib.dumps(value, fmt=plistlib.FMT_XML).decode()]
+                else:
+                    kind = "-bool" if type(value) is bool else "-int" if type(value) is int else "-string"
+                    encoded = str(value).lower() if type(value) is bool else str(value)
+                    write_args = [kind, encoded]
+                subprocess.run(["defaults", "write", domain, key, *write_args], check=True)
+    if backup.exists():
+        print(f"Previous preferences: {backup}")
+    print("Preferences checked. Relaunch affected apps or log out for changes to take effect.")
+
+
+if __name__ == "__main__":
+    main()

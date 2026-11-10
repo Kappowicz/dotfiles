@@ -1,0 +1,42 @@
+{
+  "com.apple.dock": {
+    "autohide": true,
+    "show-recents": false
+  },
+  "com.apple.finder": {
+    "ShowPathbar": true,
+    "ShowStatusBar": false,
+    "FXPreferredViewStyle": "icnv",
+    "FXEnableExtensionChangeWarning": false
+  },
+  "NSGlobalDomain": {
+    "AppleShowAllExtensions": true,
+    "KeyRepeat": 2,
+    "InitialKeyRepeat": 15,
+    "NSAutomaticSpellingCorrectionEnabled": false,
+    "NSAutomaticCapitalizationEnabled": false,
+    "NSAutomaticDashSubstitutionEnabled": false,
+    "NSAutomaticPeriodSubstitutionEnabled": false,
+    "NSAutomaticQuoteSubstitutionEnabled": false
+  },
+  "com.apple.screencapture": {},
+  "com.apple.AppleMultitouchTrackpad": {
+    "Clicking": 0,
+    "TrackpadThreeFingerDrag": false,
+    "TrackpadRightClick": true
+  },
+  "com.apple.driver.AppleBluetoothMultitouch.trackpad": {
+    "Clicking": 0,
+    "TrackpadThreeFingerDrag": false,
+    "TrackpadRightClick": true
+  },
+  "com.knollsoft.Rectangle": {
+    "allowAnyShortcut": true,
+    "alternateDefaultShortcuts": true,
+    "subsequentExecutionMode": 1,
+    "toggleTodo": {
+      "keyCode": 11,
+      "modifierFlags": 786432
+    }
+  }
+}

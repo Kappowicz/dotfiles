@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Encrypt private configuration to a caller-selected destination. Never scheduled.
+# mac-backup --dry-run
+# mac-backup /Volumes/Backup/mac-private.tar.gz.age [extra paths relative to HOME]
+set -euo pipefail
+umask 077
+DRY=0
+if [ "${1:-}" = --dry-run ]; then DRY=1; shift; fi
+DEST="${1:-}"
+if [ "$DRY" -eq 0 ] && [ -z "$DEST" ]; then
+  echo "Usage: mac-backup --dry-run | mac-backup <archive.tar.gz.age> [extra HOME-relative paths]" >&2
+  exit 2
+fi
+if [ -n "$DEST" ]; then shift; fi
+# Optional default locations may be absent, but an explicitly requested file
+# must exist: a typo in a signing-key path must not produce a successful backup.
+for path in "$@"; do
+  if [ ! -e "$HOME/$path" ] && [ ! -L "$HOME/$path" ]; then
+    echo "Requested backup path is missing: $path" >&2
+    exit 1
+  fi
+done
+# The repo's own private files, wherever it is checked out. tar works relative
+# to HOME, so a checkout outside HOME cannot be included.
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+  LINK=$(readlink "$SCRIPT_PATH")
+  case "$LINK" in /*) SCRIPT_PATH="$LINK" ;; *) SCRIPT_PATH="$(dirname "$SCRIPT_PATH")/$LINK" ;; esac
+done
+REPO_DIR=$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)
+REPO_PATHS=()
+case "$REPO_DIR" in
+  "$HOME"/*) REPO_PATHS=("${REPO_DIR#"$HOME"/}/ssh/config" "${REPO_DIR#"$HOME"/}/exports/private") ;;
+  *) echo "Note: $REPO_DIR is outside HOME; its ssh/config and exports/private are not included." >&2 ;;
+esac
+# Claude Code's per-project memory: notes that exist nowhere else.
+for dir in "$HOME"/.claude/projects/*/memory; do
+  if [ -d "$dir" ]; then REPO_PATHS+=("${dir#"$HOME"/}"); fi
+done
+PATHS=()
+# ${a[@]+...}: bash 3.2 treats an empty array as unset under `set -u`.
+for path in .ssh .gitconfig .config/rclone .config/gh \
+    .claude.json .claude/settings.json .claude/skills \
+    .codex/auth.json .codex/config.toml .codex/skills .cursor/cli-config.json \
+    .gemini/antigravity-cli/settings.json \
+    .agy-profile2/.gemini/antigravity-cli/settings.json \
+    .agy-profile3/.gemini/antigravity-cli/settings.json \
+    .gemini/antigravity-cli/antigravity-oauth-token \
+    .agy-profile2/.gemini/antigravity-cli/antigravity-oauth-token \
+    .agy-profile3/.gemini/antigravity-cli/antigravity-oauth-token \
+    ${REPO_PATHS[@]+"${REPO_PATHS[@]}"} "$@"; do
+  case "$path" in /*|..|../*|*/../*|*/..|.) echo "Use HOME-relative paths without '..': $path" >&2; exit 2 ;; esac
+  if [ -e "$HOME/$path" ] || [ -L "$HOME/$path" ]; then PATHS+=("$path"); fi
+done
+if [ "${#PATHS[@]}" -eq 0 ]; then echo "No private configuration found." >&2; exit 1; fi
+printf 'Selected: %s\n' "${PATHS[@]}"
+if [ "$DRY" -eq 1 ]; then exit 0; fi
+command -v age >/dev/null 2>&1 || { echo "Install age first (brew install age)." >&2; exit 1; }
+DEST_DIR=$(cd "$(dirname "$DEST")" && pwd)
+DEST="$DEST_DIR/$(basename "$DEST")"
+if [ -e "$DEST" ] || [ -L "$DEST" ]; then echo "Refusing to overwrite $DEST" >&2; exit 1; fi
+# Create encrypted output next to its destination; no plaintext archive on disk.
+TEMP_ARCHIVE=$(mktemp "$DEST_DIR/.dotfiles-backup.XXXXXX")
+trap 'rm -f "$TEMP_ARCHIVE"' EXIT
+COPYFILE_DISABLE=1 tar -czh -C "$HOME" -f - -- "${PATHS[@]}" | age -p -o "$TEMP_ARCHIVE"
+mv "$TEMP_ARCHIVE" "$DEST"
+echo "Encrypted backup: $DEST"
+echo "Keychain credentials require iCloud Keychain or signing in again."
