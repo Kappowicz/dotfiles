@@ -243,6 +243,133 @@ exit 0
         self.assertTrue(cached.exists())
         self.assertEqual(json.loads(cached.read_text())['email'], 'synthetic@example.invalid')
 
+    def run_limits_fetchers(self):
+        """Run both token-based fetchers in-process-isolated, with every HTTP call answering 401."""
+        script = r"""
+import importlib.machinery, importlib.util, json, sys, urllib.error, urllib.request
+loader = importlib.machinery.SourceFileLoader('limits', sys.argv[1])
+spec = importlib.util.spec_from_loader('limits', loader)
+limits = importlib.util.module_from_spec(spec)
+loader.exec_module(limits)
+urls = []
+def unauthorized(request, timeout=None):
+    urls.append(request.full_url)
+    raise urllib.error.HTTPError(request.full_url, 401, 'Unauthorized', None, None)
+urllib.request.urlopen = unauthorized
+print(json.dumps({'claude': limits.fetch_claude_quota(), 'codex': limits.fetch_codex_quota(), 'urls': urls}))
+"""
+        r = subprocess.run([sys.executable, '-c', script, str(self.repo / 'bin/limits')], env=self.env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_limits_never_refreshes_or_rewrites_expired_tokens(self):
+        credentials = json.dumps({'claudeAiOauth': {'accessToken': 'synthetic-access', 'refreshToken': 'synthetic-refresh', 'expiresAt': 1}})
+        self.stub('security', 'printf "%s\\n" "security $*" >> "$MOCK_LOG"\ncat >> "$MOCK_LOG"\n' + f"printf '%s\\n' '{credentials}'")
+        auth = self.home / '.codex/auth.json'
+        auth.parent.mkdir()
+        original = json.dumps({'tokens': {'access_token': 'synthetic-access', 'refresh_token': 'synthetic-refresh'}})
+        auth.write_text(original)
+        result = self.run_limits_fetchers()
+        # Only the two usage endpoints are contacted: no token endpoint, no retry.
+        self.assertEqual(len(result['urls']), 2, result['urls'])
+        for url in result['urls']:
+            self.assertNotIn('oauth/token', url)
+        log = self.log.read_text()
+        self.assertIn('find-generic-password', log)
+        self.assertNotIn('add-generic-password', log)
+        self.assertEqual(auth.read_text(), original)
+        for agent, command in (('claude', "'claude'"), ('codex', "'codex'")):
+            self.assertEqual(result[agent]['status'], 'error', result[agent])
+            self.assertIn('token wygasł', result[agent]['error'])
+            self.assertIn(command, result[agent]['error'])
+
+    def test_limits_source_has_no_token_refresh_code(self):
+        text = (self.repo / 'bin/limits').read_text()
+        for needle in ('grant_type', 'oauth/token', 'add-generic-password', 'def refresh_'):
+            self.assertNotIn(needle, text)
+
+    def test_backup_includes_claude_project_memory(self):
+        memory = self.home / '.claude/projects/-synthetic project/memory'
+        memory.mkdir(parents=True)
+        (memory / 'MEMORY.md').write_text('- synthetic\n')
+        # A project without a memory directory contributes nothing.
+        (self.home / '.claude/projects/-other').mkdir()
+        r = self.run_script('mac-backup', '--dry-run')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('Selected: .claude/projects/-synthetic project/memory\n', r.stdout)
+        self.assertNotIn('-other', r.stdout)
+        # The test repo lives outside HOME, so its private files cannot be archived.
+        self.assertIn('outside HOME', r.stderr)
+
+    def test_backup_finds_repo_private_files_wherever_it_is_checked_out(self):
+        checkout = self.home / 'code/my dotfiles'
+        shutil.copytree(self.repo, checkout)
+        (checkout / 'ssh/config').write_text('Host synthetic\n')
+        (checkout / 'exports/private').mkdir(parents=True)
+        (self.home / '.local/bin').mkdir(parents=True)
+        link = self.home / '.local/bin/mac-backup'
+        link.symlink_to(checkout / 'bin/mac-backup')
+        r = subprocess.run(['/bin/bash', str(link), '--dry-run'], env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('Selected: code/my dotfiles/ssh/config\n', r.stdout)
+        self.assertIn('Selected: code/my dotfiles/exports/private\n', r.stdout)
+
+    def test_oversized_log_keeps_only_its_newest_whole_lines(self):
+        log = self.home / 'Library/Logs/dotfiles/update.log'
+        log.parent.mkdir(parents=True)
+        lines = [f'line {i} ' + 'x' * 80 for i in range(30000)]
+        log.write_text('\n'.join(lines) + '\n')
+        inode = log.stat().st_ino
+        r = self.run_script('mac-update', '--force')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        kept = log.read_text().splitlines()
+        self.assertLessEqual(log.stat().st_size, 256 * 1024)
+        self.assertEqual(kept[-1], lines[-1])
+        self.assertIn(kept[0], lines)  # no line cut in half
+        # Rewritten in place: launchd keeps appending to the same open file.
+        self.assertEqual(log.stat().st_ino, inode)
+        self.assertEqual(list((self.home / '.local/state').glob('*.log.*')), [])
+
+    def test_small_log_is_left_alone(self):
+        log = self.home / 'Library/Logs/dotfiles/update.log'
+        log.parent.mkdir(parents=True)
+        log.write_text('earlier run\n')
+        r = self.run_script('mac-update', '--force')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(log.read_text(), 'earlier run\n')
+
+    def zsh_aliases(self):
+        (self.home / '.oh-my-zsh/oh-my-zsh.sh').write_text('')
+        r = subprocess.run(['zsh', '-f', '-c', 'source "$1" && alias', 'zsh', str(self.repo / 'zsh/.zshrc')], env=self.env, cwd=self.root, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr, '')
+        return dict(line.split('=', 1) for line in r.stdout.splitlines() if '=' in line)
+
+    def test_zshrc_loads_cleanly_without_optional_tools(self):
+        aliases = self.zsh_aliases()
+        for name in ('ls', 'cat', 'grep', 'rgg', 'top', 'df', 'vim'):
+            self.assertNotIn(name, aliases)
+
+    def test_zshrc_aliases_installed_tools_but_never_grep(self):
+        for tool in ('lsd', 'bat', 'rg', 'btop', 'duf', 'nvim'):
+            self.stub(tool, 'exit 0')
+        self.stub('fzf', 'exit 0')
+        self.stub('zoxide', 'exit 0')
+        aliases = self.zsh_aliases()
+        self.assertEqual(aliases['ls'], 'lsd')
+        self.assertIn('rg --no-ignore', aliases['rgg'])
+        self.assertNotIn('grep', aliases)
+        for name in ('cat', 'top', 'df', 'vim', 'vi'):
+            self.assertIn(name, aliases)
+
+    def test_install_does_not_report_links_ok_when_a_source_is_missing(self):
+        (self.repo / 'ghostty/config').unlink()
+        r = self.run_script('install', '--yes', '--no-brew', '--no-cli', '--no-settings', '--no-agents')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('FAILED: Missing source:', r.stderr)
+        self.assertNotIn('OK: Configuration links', r.stdout)
+        self.assertIn('OK: Agent settings and status lines', r.stdout)
+
     def test_backup_encrypts_and_preserves_symlinked_ssh_config(self):
         age = shutil.which('age')
         keygen = shutil.which('age-keygen')
