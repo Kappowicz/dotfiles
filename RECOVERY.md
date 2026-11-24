@@ -66,8 +66,9 @@
 5. Restart the terminal. Check `git config user.name` and `git config user.email`
    and replace any template identity before committing.
 6. Sign in to GitHub (`gh auth login`), Claude Code, Codex, Cursor Agent and
-   Antigravity. Sign in separately for `agy2` and `agy3` if you use those profiles.
-   Verify the corresponding profile status-line settings before using `limits`.
+   Antigravity. Sign in separately for `agy2` and `agy3` if you use those profiles,
+   then re-run `./install.sh`: it sets up an extra profile's settings and status
+   line only once its directory exists. Verify them before using `limits`.
 7. Import Raycast/Rectangle exports and restore browser sync, Google Drive,
    VPN settings and other app accounts. Restore custom widgets from your data
    backup; this repo installs Übersicht but does not include the private
