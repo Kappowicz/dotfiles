@@ -250,10 +250,14 @@ if command -v ghostty >/dev/null 2>&1 || [ -n "$ghostty_launcher" ]; then
     mkdir -p "$HOME/.config/ghostty"
     link_file "${DOTFILES_DIR}/ghostty/config" "$HOME/.config/ghostty/config"
     ghostty_local="$HOME/.config/ghostty/local.conf"
-    if [ -n "$ghostty_launcher" ] && grep -q '^Exec=.*distrobox-enter' "$ghostty_launcher" &&
+    # Only for a distrobox-only Ghostty: a native one on the host has no
+    # distrobox-host-exec and would fail to start any shell.
+    if ! command -v ghostty >/dev/null 2>&1 && [ -n "$ghostty_launcher" ] &&
+       grep -q '^Exec=.*distrobox-enter' "$ghostty_launcher" &&
        [ ! -e "$ghostty_local" ] && command -v zsh >/dev/null 2>&1; then
         {
             echo "# Written by install-linux.sh: Ghostty runs in a distrobox; open the host's zsh."
+            echo "# Delete this file if you install Ghostty natively on the host instead."
             echo "command = /usr/bin/distrobox-host-exec $(command -v zsh) -l"
         } > "$ghostty_local"
         echo "==> Created ~/.config/ghostty/local.conf (Ghostty opens the host's zsh)."

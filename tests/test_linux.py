@@ -163,6 +163,15 @@ exit 0
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual((self.home / '.config/ghostty/local.conf').read_text(), 'font-size = 14\n')
 
+    def test_native_ghostty_wins_over_stale_distrobox_launcher(self):
+        self.stub('zsh', 'exit 0')
+        self.stub('ghostty', 'exit 0')
+        self.make_ghostty_launcher('/usr/bin/distrobox-enter -n arch -- ghostty')
+        r = self.install('--no-brew', '--no-cli')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((self.home / '.config/ghostty/config').is_symlink())
+        self.assertFalse((self.home / '.config/ghostty/local.conf').exists())
+
     def test_native_ghostty_gets_config_without_host_shell(self):
         self.stub('ghostty', 'exit 0')
         r = self.install('--no-brew', '--no-cli')
