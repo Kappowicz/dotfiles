@@ -239,9 +239,12 @@ if [ -d "$HOME/.config/Cursor/User" ]; then
 fi
 
 # Ghostty has no Flatpak or Linux Homebrew build; on SteamOS it runs from a
-# distrobox and is exported to the app menu. Inside the container it would
-# start the container's bare shell, so a machine-local include makes it open
-# the host's zsh instead. The shared config stays identical to macOS.
+# distrobox and is exported to the app menu. By default it would start the
+# container's bash, so a machine-local include makes it start zsh inside the
+# container, which shares $HOME and sees Homebrew via a /home/linuxbrew link
+# (see README). Not the host's zsh via distrobox-host-exec: that adds a second
+# pty layer that echoes every typed character twice. The shared config stays
+# identical to macOS.
 ghostty_launcher=""
 for desktop_file in "$HOME"/.local/share/applications/*ghostty*.desktop; do
     if [ -f "$desktop_file" ]; then ghostty_launcher="$desktop_file"; break; fi
@@ -250,17 +253,19 @@ if command -v ghostty >/dev/null 2>&1 || [ -n "$ghostty_launcher" ]; then
     mkdir -p "$HOME/.config/ghostty"
     link_file "${DOTFILES_DIR}/ghostty/config" "$HOME/.config/ghostty/config"
     ghostty_local="$HOME/.config/ghostty/local.conf"
-    # Only for a distrobox-only Ghostty: a native one on the host has no
-    # distrobox-host-exec and would fail to start any shell.
+    # Only for a distrobox-only Ghostty; a native one uses the host's shell as is.
     if ! command -v ghostty >/dev/null 2>&1 && [ -n "$ghostty_launcher" ] &&
-       grep -q '^Exec=.*distrobox-enter' "$ghostty_launcher" &&
-       [ ! -e "$ghostty_local" ] && command -v zsh >/dev/null 2>&1; then
+       grep -q '^Exec=.*distrobox-enter' "$ghostty_launcher" && [ ! -e "$ghostty_local" ]; then
         {
-            echo "# Written by install-linux.sh: Ghostty runs in a distrobox; open the host's zsh."
+            echo "# Written by install-linux.sh: Ghostty runs in a distrobox; start zsh inside it."
+            echo "# Needs zsh and the /home/linuxbrew link in the container (see README)."
             echo "# Delete this file if you install Ghostty natively on the host instead."
-            echo "command = /usr/bin/distrobox-host-exec $(command -v zsh) -l"
+            echo "command = /usr/bin/zsh -l"
+            echo "# Quit with the last window: a lingering single instance keeps the old"
+            echo "# config, so changes (like this file) would never apply."
+            echo "quit-after-last-window-closed = true"
         } > "$ghostty_local"
-        echo "==> Created ~/.config/ghostty/local.conf (Ghostty opens the host's zsh)."
+        echo "==> Created ~/.config/ghostty/local.conf (Ghostty starts zsh in its distrobox)."
     fi
 fi
 

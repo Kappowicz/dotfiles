@@ -88,18 +88,24 @@ which sets up the portable half of the repo and leaves the macOS-only parts
 - Git, SSH, agent settings and status lines as on macOS. VS Code and Cursor
   settings are linked only when the editor is installed (native or Flatpak).
 - Ghostty has no Flatpak or Linux Homebrew build. On SteamOS install it in an
-  Arch distrobox and export it to the app menu (run this from `~`, not from
-  inside this repo, where the `ghostty/` directory confuses `distrobox-export`):
+  Arch distrobox, with zsh, and export it to the app menu. Run this from `~`,
+  not from inside this repo, where the `ghostty/` directory confuses
+  `distrobox-export`:
 
   ```bash
   distrobox create --yes --name arch --image docker.io/library/archlinux:latest
-  distrobox enter arch -- sudo pacman -Syu --noconfirm ghostty
+  distrobox enter arch -- sudo pacman -Syu --noconfirm ghostty zsh
+  # distrobox shares only $HOME; this makes the host's Homebrew visible too
+  distrobox enter arch -- sudo ln -sfn /run/host/home/linuxbrew /home/linuxbrew
   distrobox enter arch -- distrobox-export --app ghostty
   ```
 
   Then re-run `install.sh`: it links `ghostty/config` and writes a machine-local
-  `~/.config/ghostty/local.conf` so new windows open the host's zsh rather than
-  the container's shell.
+  `~/.config/ghostty/local.conf` that starts zsh inside the container. That
+  shell shares your home directory, so `.zshrc`, nvm, Homebrew and
+  `~/.local/bin` all work. It deliberately does not use `distrobox-host-exec`
+  to reach the host's shell: the extra pty layer echoes every typed character
+  twice.
 - `ssh/config` gets `IgnoreUnknown UseKeychain`: Linux OpenSSH otherwise
   rejects the whole file because of the macOS-only `UseKeychain` option.
 
