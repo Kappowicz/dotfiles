@@ -1,4 +1,4 @@
-# macOS Dotfiles
+# macOS (and Linux) Dotfiles
 
 Personal macOS setup: shell configuration, a package/application inventory,
 editor and terminal settings, agent CLIs, saved macOS preferences, and two
@@ -68,12 +68,35 @@ instructions. Existing installations are not migrated or upgraded by bootstrap.
 
 ---
 
+## Linux (SteamOS)
+
+The same `./install.sh` works on Linux: it hands over to `install-linux.sh`,
+which sets up the portable half of the repo and leaves the macOS-only parts
+(casks, `defaults`, launchd, the `mac-*` jobs) out. Tested on SteamOS.
+
+- Packages come from **Homebrew on Linux** and `Brewfile.linux`, never from the
+  system package manager. Everything lives under `/home` (`/home/linuxbrew` and
+  your home directory), so SteamOS updates, which replace `/usr`, do not touch it.
+  Installing Homebrew asks for `sudo` once, to create `/home/linuxbrew`.
+- zsh, oh-my-zsh and the same `.zshrc` / `.zprofile`; `.zprofile` finds the
+  Linux Homebrew prefix. Homebrew is also added to `~/.bashrc`, because SteamOS
+  and Konsole start bash by default. The login shell is left alone; the report
+  at the end shows how to switch.
+- Git, SSH, agent settings and status lines as on macOS. VS Code and Cursor
+  settings are linked only when the editor is installed (native or Flatpak).
+- `ssh/config` gets `IgnoreUnknown UseKeychain`: Linux OpenSSH otherwise
+  rejects the whole file because of the macOS-only `UseKeychain` option.
+
+Flags are the same; `--no-settings` and `--no-agents` are accepted and ignored.
+
 ## Layout
 
 ```text
 dotfiles/
 ├── Brewfile                  # Homebrew formulae, casks and VS Code extensions
-├── install.sh                # Idempotent bootstrap
+├── Brewfile.linux            # Homebrew formulae for Linux
+├── install.sh                # Idempotent bootstrap (hands over to install-linux.sh on Linux)
+├── install-linux.sh          # Linux bootstrap
 ├── zsh/
 │   ├── .zshrc                # Aliases (only for installed tools), history, fzf, zoxide, extract()
 │   └── .zprofile             # PATH and Homebrew init

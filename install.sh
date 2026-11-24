@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# macOS dotfiles bootstrap
+# macOS dotfiles bootstrap (on Linux it hands over to install-linux.sh)
 #
 # Idempotent: safe to re-run. Anything it replaces is moved aside with a
 # .backup-<timestamp> suffix first.
@@ -13,6 +13,7 @@
 set -euo pipefail
 
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "$(uname -s)" = Linux ]; then exec "${DOTFILES_DIR}/install-linux.sh" "$@"; fi
 BACKUP_SUFFIX=".backup-$(date +%Y%m%d%H%M%S)"
 ASSUME_YES=0
 SKIP_BREW=0
