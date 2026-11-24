@@ -2,5 +2,5 @@ theme = Citruszest
 
 # Machine-specific settings, next to this file in ~/.config/ghostty and never
 # tracked. The ? makes it optional. install-linux.sh writes it on Linux when
-# Ghostty runs inside a distrobox, so new windows open the host's zsh.
+# Ghostty runs inside a distrobox, so new windows start zsh instead of bash.
 config-file = ?local.conf

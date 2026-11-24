@@ -143,7 +143,7 @@ exit 0
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse((self.home / '.config/ghostty').exists())
 
-    def test_distrobox_ghostty_gets_config_and_host_shell(self):
+    def test_distrobox_ghostty_gets_config_and_container_zsh(self):
         self.stub('zsh', 'exit 0')
         self.make_ghostty_launcher('/usr/bin/distrobox-enter  -n arch  --   ghostty --gtk-single-instance=true')
         for _ in range(2):
@@ -151,7 +151,8 @@ exit 0
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(os.readlink(self.home / '.config/ghostty/config'), str(self.repo / 'ghostty/config'))
         local = (self.home / '.config/ghostty/local.conf').read_text()
-        self.assertIn(f'command = /usr/bin/distrobox-host-exec {self.mock}/zsh -l', local)
+        self.assertIn('command = /usr/bin/zsh -l', local)
+        self.assertNotIn('distrobox-host-exec', local)
         self.assertEqual(local.count('command ='), 1)
 
     def test_existing_ghostty_local_conf_is_preserved(self):
