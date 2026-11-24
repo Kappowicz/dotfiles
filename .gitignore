@@ -5,6 +5,7 @@
 
 # Machine-specific files, generated from the .example templates by install.sh
 ssh/config
+ghostty/local.conf
 # ~/.gitconfig itself lives in $HOME, never in this repo — see git/gitconfig.example
 
 # Security / secrets safety guard

@@ -20,7 +20,7 @@ class LinuxInstallTests(unittest.TestCase):
         self.home.mkdir()
         self.repo = self.root / 'repo'
         self.repo.mkdir()
-        for name in ['bin', 'zsh', 'git', 'vscode', 'cursor', 'claude', 'codex', 'antigravity']:
+        for name in ['bin', 'zsh', 'git', 'ghostty', 'vscode', 'cursor', 'claude', 'codex', 'antigravity']:
             shutil.copytree(REPO / name, self.repo / name)
         (self.repo / 'ssh').mkdir()
         shutil.copy2(REPO / 'ssh/config.example', self.repo / 'ssh/config.example')
@@ -132,6 +132,52 @@ exit 0
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue((self.home / '.agy-profile2/.gemini/antigravity-cli/statusline.py').is_symlink())
         self.assertFalse((self.home / '.agy-profile3').exists())
+
+    def make_ghostty_launcher(self, exec_line):
+        apps = self.home / '.local/share/applications'
+        apps.mkdir(parents=True)
+        (apps / 'arch-com.mitchellh.ghostty.desktop').write_text(f'[Desktop Entry]\nName=Ghostty\nExec={exec_line}\n')
+
+    def test_ghostty_not_configured_when_absent(self):
+        r = self.install('--no-brew', '--no-cli')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse((self.home / '.config/ghostty').exists())
+
+    def test_distrobox_ghostty_gets_config_and_host_shell(self):
+        self.stub('zsh', 'exit 0')
+        self.make_ghostty_launcher('/usr/bin/distrobox-enter  -n arch  --   ghostty --gtk-single-instance=true')
+        for _ in range(2):
+            r = self.install('--no-brew', '--no-cli')
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(os.readlink(self.home / '.config/ghostty/config'), str(self.repo / 'ghostty/config'))
+        local = (self.home / '.config/ghostty/local.conf').read_text()
+        self.assertIn(f'command = /usr/bin/distrobox-host-exec {self.mock}/zsh -l', local)
+        self.assertEqual(local.count('command ='), 1)
+
+    def test_existing_ghostty_local_conf_is_preserved(self):
+        self.stub('zsh', 'exit 0')
+        self.make_ghostty_launcher('/usr/bin/distrobox-enter -n arch -- ghostty')
+        (self.home / '.config/ghostty').mkdir(parents=True)
+        (self.home / '.config/ghostty/local.conf').write_text('font-size = 14\n')
+        r = self.install('--no-brew', '--no-cli')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((self.home / '.config/ghostty/local.conf').read_text(), 'font-size = 14\n')
+
+    def test_native_ghostty_wins_over_stale_distrobox_launcher(self):
+        self.stub('zsh', 'exit 0')
+        self.stub('ghostty', 'exit 0')
+        self.make_ghostty_launcher('/usr/bin/distrobox-enter -n arch -- ghostty')
+        r = self.install('--no-brew', '--no-cli')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((self.home / '.config/ghostty/config').is_symlink())
+        self.assertFalse((self.home / '.config/ghostty/local.conf').exists())
+
+    def test_native_ghostty_gets_config_without_host_shell(self):
+        self.stub('ghostty', 'exit 0')
+        r = self.install('--no-brew', '--no-cli')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((self.home / '.config/ghostty/config').is_symlink())
+        self.assertFalse((self.home / '.config/ghostty/local.conf').exists())
 
     def test_brew_bundle_failure_is_reported(self):
         r = self.install('--no-cli', BREW_FAIL='1')
