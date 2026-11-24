@@ -42,4 +42,4 @@ jobs:
           bash -n install.sh install-linux.sh bin/install-cli
           zsh -n zsh/.zshrc zsh/.zprofile
       - name: Linux installer tests
-        run: python3 -m unittest tests/test_linux.py -v
+        run: python3 -m unittest tests/test_linux.py tests/test_install_cli.py -v
