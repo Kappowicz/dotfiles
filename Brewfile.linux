@@ -1,0 +1,68 @@
+# Homebrew on Linux (used by install-linux.sh). Formulae only: casks are macOS
+# apps. Kept separate from Brewfile so `brew bundle dump` on the Mac never has
+# to know about this machine.
+#
+# Left out on purpose:
+#   coreutils, gnu-sed  - Linux already ships the GNU versions
+#   lcov                - Android/Flutter coverage, a macOS workflow here
+#   mas, ollama, qemu   - macOS-only or too heavy for a handheld/console
+#   mtr                 - needs raw-socket capabilities brew cannot grant
+#   node                - SteamOS setups usually use nvm; avoid a second node
+#   topgrade            - topgrade.toml runs a macOS-only Android Studio step
+
+# Simple, modern, secure file encryption
+brew "age"
+# Clone of cat(1) with syntax highlighting and Git integration
+brew "bat"
+# Resource monitor. C++ version and continuation of bashtop and bpytop
+brew "btop"
+# Disk Usage/Free Utility - a better 'df' alternative
+brew "duf"
+# Simple, fast and user-friendly alternative to find
+brew "fd"
+# Command-line fuzzy finder written in Go
+brew "fzf"
+# GitHub command-line tool
+brew "gh"
+# Syntax-highlighting pager for git and diff output (git/.gitconfig uses it)
+brew "git-delta"
+# Lightweight and flexible command-line JSON processor
+brew "jq"
+# Simple terminal UI for git commands
+brew "lazygit"
+# Clone of ls with colorful output, file type icons, and more
+brew "lsd"
+# Ambitious Vim-fork focused on extensibility and agility
+brew "neovim"
+# Port scanning utility for large networks
+brew "nmap"
+# Vulnerability scanner which uses the OSV database
+brew "osv-scanner"
+# PDF rendering library (based on the xpdf-3.0 code base)
+brew "poppler"
+# Monitor data's progress through a pipe
+brew "pv"
+# Rsync for cloud storage
+brew "rclone"
+# Search tool like grep and The Silver Searcher
+brew "ripgrep"
+# Utility that provides fast incremental file transfer
+brew "rsync"
+# Easily detect and prevent bugs and anti-patterns in your codebase
+brew "semgrep"
+# 7-Zip; provides the 7zz that extract() in .zshrc calls
+brew "sevenzip"
+# Static analysis and lint tool, for (ba)sh scripts
+brew "shellcheck"
+# Official tldr client written in Rust
+brew "tlrc"
+# Display directories as trees (with optional color/HTML output)
+brew "tree"
+# Extremely fast Python package installer; replaces pip, which SteamOS lacks
+brew "uv"
+# Executes a program periodically, showing output fullscreen
+brew "watch"
+# Wayland clipboard: wl-copy / wl-paste (pbcopy / pbpaste equivalents)
+brew "wl-clipboard"
+# Shell extension to navigate your filesystem faster
+brew "zoxide"

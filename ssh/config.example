@@ -4,6 +4,10 @@
 # keeps it in the Keychain across reboots. Without them every non-interactive
 # ssh (scripts, backups) fails with "Permission denied" even though the key is
 # fine — the server accepts it, there is just nothing to sign with.
+#
+# UseKeychain exists only in macOS OpenSSH; IgnoreUnknown keeps Linux OpenSSH
+# from rejecting the whole file because of it.
+IgnoreUnknown UseKeychain
 
 Host myserver
     HostName 192.168.1.10
