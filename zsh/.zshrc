@@ -104,6 +104,13 @@ for _sdk in "$HOMEBREW_PREFIX/share/android-commandlinetools" "$HOME/Library/And
 done
 unset _sdk
 
+#nvm, where node (and npm-installed CLIs such as claude and codex) comes from
+#nvm instead of Homebrew, e.g. on SteamOS. guarded: a no-op without nvm.
+if [ -s "$HOME/.nvm/nvm.sh" ]; then
+    export NVM_DIR="$HOME/.nvm"
+    source "$NVM_DIR/nvm.sh"
+fi
+
 #fzf: ctrl-r history search, ctrl-t files, alt-c cd
 if (( $+commands[fzf] )); then source <(fzf --zsh); fi
 
