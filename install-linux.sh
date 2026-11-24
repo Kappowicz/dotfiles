@@ -261,6 +261,9 @@ if command -v ghostty >/dev/null 2>&1 || [ -n "$ghostty_launcher" ]; then
             echo "# Needs zsh and the /home/linuxbrew link in the container (see README)."
             echo "# Delete this file if you install Ghostty natively on the host instead."
             echo "command = /usr/bin/zsh -l"
+            echo "# Quit with the last window: a lingering single instance keeps the old"
+            echo "# config, so changes (like this file) would never apply."
+            echo "quit-after-last-window-closed = true"
         } > "$ghostty_local"
         echo "==> Created ~/.config/ghostty/local.conf (Ghostty starts zsh in its distrobox)."
     fi

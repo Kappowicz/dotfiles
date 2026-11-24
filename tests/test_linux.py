@@ -153,6 +153,7 @@ exit 0
         local = (self.home / '.config/ghostty/local.conf').read_text()
         self.assertIn('command = /usr/bin/zsh -l', local)
         self.assertNotIn('distrobox-host-exec', local)
+        self.assertIn('quit-after-last-window-closed = true', local)
         self.assertEqual(local.count('command ='), 1)
 
     def test_existing_ghostty_local_conf_is_preserved(self):
