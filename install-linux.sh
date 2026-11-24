@@ -318,7 +318,9 @@ COMPLETED_STEPS+=("Homebrew in ~/.bashrc")
 echo
 if command -v zsh >/dev/null 2>&1 && [ "$(basename "${SHELL:-}")" != zsh ]; then
     echo "To use zsh and these settings by default, either:"
-    echo "  - set Konsole's profile command to $(command -v zsh)   (Settings -> Edit Current Profile), or"
+    # -l: a login shell reads ~/.zprofile, which puts Homebrew and ~/.local/bin
+    # on PATH (macOS terminals start login shells by default; Konsole does not).
+    echo "  - set Konsole's profile command to $(command -v zsh) -l   (Settings -> Edit Current Profile), or"
     echo "  - change your login shell:  chsh -s $(command -v zsh)"
 fi
 if [ "${NEEDS_IDENTITY:-0}" -eq 1 ]; then

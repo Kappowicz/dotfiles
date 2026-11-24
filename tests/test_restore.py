@@ -358,6 +358,15 @@ print(json.dumps({'claude': limits.fetch_claude_quota(), 'codex': limits.fetch_c
         for name in ('ls', 'cat', 'grep', 'rgg', 'top', 'df', 'vim'):
             self.assertNotIn(name, aliases)
 
+    def test_zshrc_loads_nvm_when_present(self):
+        nvm = self.home / '.nvm'
+        nvm.mkdir()
+        (nvm / 'nvm.sh').write_text('export NVM_LOADED=yes\n')
+        (self.home / '.oh-my-zsh/oh-my-zsh.sh').write_text('')
+        r = subprocess.run(['zsh', '-f', '-c', 'source "$1" && print -r -- "$NVM_LOADED $NVM_DIR"', 'zsh', str(self.repo / 'zsh/.zshrc')], env=self.env, cwd=self.root, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), f'yes {nvm}')
+
     def test_zshrc_aliases_installed_tools_but_never_grep(self):
         for tool in ('lsd', 'bat', 'rg', 'btop', 'duf', 'nvim'):
             self.stub(tool, 'exit 0')
