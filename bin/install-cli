@@ -23,9 +23,37 @@ native_install() {
     FAILED=1
   fi
 }
+# Antigravity's bootstrap takes only --dir and always ends with `agy install`,
+# which appends PATH and aliases to shell profiles; ~/.zshrc is a symlink into
+# this repo, so those lines would land in a tracked file. The skip flags now
+# belong to `agy install` itself. So: run the bootstrap against a throwaway
+# HOME, keep only the verified binary, then configure the real HOME without
+# touching any shell profile.
+install_agy() {
+  local fake_home="$WORK_DIR/agy-home"
+  if command -v agy >/dev/null 2>&1; then
+    echo "   already installed: agy"
+    return
+  fi
+  echo "==> Installing agy..."
+  mkdir -p "$fake_home" "$HOME/.local/bin"
+  if curl -fsSL https://antigravity.google/cli/install.sh -o "$WORK_DIR/agy.sh" &&
+     HOME="$fake_home" bash "$WORK_DIR/agy.sh" &&
+     [ -x "$fake_home/.local/bin/agy" ] &&
+     cp "$fake_home/.local/bin/agy" "$HOME/.local/bin/agy" &&
+     "$HOME/.local/bin/agy" install --skip-aliases --skip-path; then
+    if ! command -v agy >/dev/null 2>&1; then
+      echo "Installer completed but agy is missing from PATH." >&2
+      FAILED=1
+    fi
+  else
+    echo "Installation failed: agy" >&2
+    FAILED=1
+  fi
+}
 native_install claude https://claude.ai/install.sh
 native_install agent https://cursor.com/install
-native_install agy https://antigravity.google/cli/install.sh --skip-aliases --skip-path
+install_agy
 if command -v codex >/dev/null 2>&1; then
   echo "   already installed: codex"
 elif ! command -v npm >/dev/null 2>&1; then
