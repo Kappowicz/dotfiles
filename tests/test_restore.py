@@ -232,6 +232,14 @@ exit 0
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(json.loads(p.read_text()), {'theme': 'existing'})
 
+    def test_extra_agy_profiles_only_configured_when_present(self):
+        (self.home / '.agy-profile2').mkdir()
+        r = self.run_script('install', '--yes', '--no-brew', '--no-cli', '--no-settings', '--no-agents')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((self.home / '.gemini/antigravity-cli/statusline.py').is_symlink())
+        self.assertTrue((self.home / '.agy-profile2/.gemini/antigravity-cli/statusline.py').is_symlink())
+        self.assertFalse((self.home / '.agy-profile3').exists())
+
     def test_limits_and_statusline_share_portable_profile_cache(self):
         # No network or auth calls: feed a synthetic status line and inspect its cache.
         payload = json.dumps({'email': 'synthetic@example.invalid', 'quota': {}, 'model': {}})

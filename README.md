@@ -51,6 +51,9 @@ The script asks for confirmation, then:
    `<file>.backup-<timestamp>`.
 6. Copies portable agent defaults on fresh machines and links status-line hooks.
    Existing agent config files are preserved so local trust/auth settings stay local.
+   The extra Antigravity profiles (`~/.agy-profile2`, `~/.agy-profile3`) are
+   configured only if they already exist, since each needs its own sign-in:
+   run `agy2` / `agy3` once to sign in, then re-run `install.sh`.
 7. Restores the preferences in `macos/settings.json`, backing up changed domains
    under `~/.local/state/dotfiles/preferences/`.
 8. Installs two launchd agents, resolving `__HOME__` to the current user.
@@ -84,8 +87,6 @@ which sets up the portable half of the repo and leaves the macOS-only parts
   at the end shows how to switch.
 - Git, SSH, agent settings and status lines as on macOS. VS Code and Cursor
   settings are linked only when the editor is installed (native or Flatpak).
-  The extra Antigravity profiles (`~/.agy-profile2`, `~/.agy-profile3`) are
-  configured only if they already exist: each one needs its own sign-in.
 - `ssh/config` gets `IgnoreUnknown UseKeychain`: Linux OpenSSH otherwise
   rejects the whole file because of the macOS-only `UseKeychain` option.
 

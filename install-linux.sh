@@ -256,8 +256,9 @@ copy_config "${DOTFILES_DIR}/claude/settings.json" "$HOME/.claude/settings.json"
 mkdir -p "$HOME/.claude/hooks" "$HOME/.gemini/antigravity-cli"
 link_file "${DOTFILES_DIR}/claude/statusline.sh" "$HOME/.claude/statusline.sh"
 link_file "${DOTFILES_DIR}/claude/hooks/skill-statusline.sh" "$HOME/.claude/hooks/skill-statusline.sh"
-# Extra Antigravity profiles (agy2/agy3) each need their own sign-in, so on
-# Linux they are set up only when already present, never created.
+# Extra Antigravity profiles (agy2/agy3) each need their own sign-in, so they
+# are set up only when already present, never created. Sign in with `agy2` /
+# `agy3` first, then re-run install.sh to add their status line.
 agy_profiles=("$HOME")
 for extra in "$HOME/.agy-profile2" "$HOME/.agy-profile3"; do
     if [ -d "$extra" ]; then agy_profiles+=("$extra"); fi
