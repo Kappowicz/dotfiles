@@ -119,6 +119,20 @@ exit 0
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(p.read_text(), '{"theme":"existing"}\n')
 
+    def test_extra_agy_profiles_are_not_created(self):
+        r = self.install('--no-brew', '--no-cli')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((self.home / '.gemini/antigravity-cli/statusline.py').is_symlink())
+        self.assertFalse((self.home / '.agy-profile2').exists())
+        self.assertFalse((self.home / '.agy-profile3').exists())
+
+    def test_existing_extra_agy_profile_is_configured(self):
+        (self.home / '.agy-profile2').mkdir()
+        r = self.install('--no-brew', '--no-cli')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((self.home / '.agy-profile2/.gemini/antigravity-cli/statusline.py').is_symlink())
+        self.assertFalse((self.home / '.agy-profile3').exists())
+
     def test_brew_bundle_failure_is_reported(self):
         r = self.install('--no-cli', BREW_FAIL='1')
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)

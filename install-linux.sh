@@ -41,7 +41,7 @@ echo "  ~/.zshrc  ~/.zprofile  ~/.config/git/ignore  ~/.ssh/config"
 echo "  ~/.local/bin/limits"
 echo "  VS Code and Cursor settings.json, only where those editors are installed"
 echo "  status-line scripts in ~/.claude and ~/.gemini/antigravity-cli"
-echo "    (also under ~/.agy-profile2 and ~/.agy-profile3, created if missing)"
+echo "    (also under ~/.agy-profile2 and ~/.agy-profile3, only if they already exist)"
 echo "Existing files are backed up, not deleted."
 echo
 echo "It also:"
@@ -256,7 +256,13 @@ copy_config "${DOTFILES_DIR}/claude/settings.json" "$HOME/.claude/settings.json"
 mkdir -p "$HOME/.claude/hooks" "$HOME/.gemini/antigravity-cli"
 link_file "${DOTFILES_DIR}/claude/statusline.sh" "$HOME/.claude/statusline.sh"
 link_file "${DOTFILES_DIR}/claude/hooks/skill-statusline.sh" "$HOME/.claude/hooks/skill-statusline.sh"
-for profile_home in "$HOME" "$HOME/.agy-profile2" "$HOME/.agy-profile3"; do
+# Extra Antigravity profiles (agy2/agy3) each need their own sign-in, so on
+# Linux they are set up only when already present, never created.
+agy_profiles=("$HOME")
+for extra in "$HOME/.agy-profile2" "$HOME/.agy-profile3"; do
+    if [ -d "$extra" ]; then agy_profiles+=("$extra"); fi
+done
+for profile_home in "${agy_profiles[@]}"; do
     copy_config "${DOTFILES_DIR}/antigravity/settings.json" "$profile_home/.gemini/antigravity-cli/settings.json"
     mkdir -p "$profile_home/.gemini/antigravity-cli"
     link_file "${DOTFILES_DIR}/antigravity/statusline.py" "$profile_home/.gemini/antigravity-cli/statusline.py"
