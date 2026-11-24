@@ -87,6 +87,19 @@ which sets up the portable half of the repo and leaves the macOS-only parts
   at the end shows how to switch.
 - Git, SSH, agent settings and status lines as on macOS. VS Code and Cursor
   settings are linked only when the editor is installed (native or Flatpak).
+- Ghostty has no Flatpak or Linux Homebrew build. On SteamOS install it in an
+  Arch distrobox and export it to the app menu (run this from `~`, not from
+  inside this repo, where the `ghostty/` directory confuses `distrobox-export`):
+
+  ```bash
+  distrobox create --yes --name arch --image docker.io/library/archlinux:latest
+  distrobox enter arch -- sudo pacman -Syu --noconfirm ghostty
+  distrobox enter arch -- distrobox-export --app ghostty
+  ```
+
+  Then re-run `install.sh`: it links `ghostty/config` and writes a machine-local
+  `~/.config/ghostty/local.conf` so new windows open the host's zsh rather than
+  the container's shell.
 - `ssh/config` gets `IgnoreUnknown UseKeychain`: Linux OpenSSH otherwise
   rejects the whole file because of the macOS-only `UseKeychain` option.
 

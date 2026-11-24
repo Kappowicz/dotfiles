@@ -39,6 +39,7 @@ echo
 echo "This will replace the following with symlinks into this repo:"
 echo "  ~/.zshrc  ~/.zprofile  ~/.config/git/ignore  ~/.ssh/config"
 echo "  ~/.local/bin/limits"
+echo "  ~/.config/ghostty/config, only where Ghostty is installed"
 echo "  VS Code and Cursor settings.json, only where those editors are installed"
 echo "  status-line scripts in ~/.claude and ~/.gemini/antigravity-cli"
 echo "    (also under ~/.agy-profile2 and ~/.agy-profile3, only if they already exist)"
@@ -235,6 +236,28 @@ for user_dir in "$HOME/.config/Code/User" "$HOME/.var/app/com.visualstudio.code/
 done
 if [ -d "$HOME/.config/Cursor/User" ]; then
     link_file "${DOTFILES_DIR}/cursor/settings.json" "$HOME/.config/Cursor/User/settings.json"
+fi
+
+# Ghostty has no Flatpak or Linux Homebrew build; on SteamOS it runs from a
+# distrobox and is exported to the app menu. Inside the container it would
+# start the container's bare shell, so a machine-local include makes it open
+# the host's zsh instead. The shared config stays identical to macOS.
+ghostty_launcher=""
+for desktop_file in "$HOME"/.local/share/applications/*ghostty*.desktop; do
+    if [ -f "$desktop_file" ]; then ghostty_launcher="$desktop_file"; break; fi
+done
+if command -v ghostty >/dev/null 2>&1 || [ -n "$ghostty_launcher" ]; then
+    mkdir -p "$HOME/.config/ghostty"
+    link_file "${DOTFILES_DIR}/ghostty/config" "$HOME/.config/ghostty/config"
+    ghostty_local="$HOME/.config/ghostty/local.conf"
+    if [ -n "$ghostty_launcher" ] && grep -q '^Exec=.*distrobox-enter' "$ghostty_launcher" &&
+       [ ! -e "$ghostty_local" ] && command -v zsh >/dev/null 2>&1; then
+        {
+            echo "# Written by install-linux.sh: Ghostty runs in a distrobox; open the host's zsh."
+            echo "command = /usr/bin/distrobox-host-exec $(command -v zsh) -l"
+        } > "$ghostty_local"
+        echo "==> Created ~/.config/ghostty/local.conf (Ghostty opens the host's zsh)."
+    fi
 fi
 
 link_file "${DOTFILES_DIR}/ssh/config" "$HOME/.ssh/config"
