@@ -19,12 +19,14 @@ cat > "$HOME/.local/bin/agy" <<'AGY'
 #!/bin/bash
 printf 'agy %s HOME=%s\n' "$*" "$HOME" >> "$MOCK_LOG"
 if [ "${1:-}" = install ]; then
+  [ "${AGY_SETUP_FAIL:-0}" = 1 ] && exit 3
   case " $* " in *" --skip-path "*) ;; *) echo 'export PATH=agy' >> "$HOME/.zshrc" ;; esac
   case " $* " in *" --skip-aliases "*) ;; *) echo 'alias agy=agy' >> "$HOME/.zshrc" ;; esac
 fi
 AGY
 chmod +x "$HOME/.local/bin/agy"
-"$HOME/.local/bin/agy" install
+# The real bootstrap ignores a failing setup step the same way.
+"$HOME/.local/bin/agy" install || true
 '''
 
 
@@ -91,6 +93,17 @@ cp "{self.root}/agy-bootstrap.sh" "$out"
         self.assertEqual(r.returncode, 1)
         self.assertIn('Installation failed: agy', r.stderr)
         self.assertFalse((self.home / '.local/bin/agy').exists())
+
+    def test_failed_agy_setup_removes_binary_so_rerun_retries(self):
+        r = self.run_cli(AGY_SETUP_FAIL='1')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("setup step 'agy install'", r.stderr)
+        self.assertFalse((self.home / '.local/bin/agy').exists())
+        r = self.run_cli()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn('already installed: agy', r.stdout)
+        self.assertTrue(os.access(self.home / '.local/bin/agy', os.X_OK))
+        self.assertEqual(self.zshrc.read_text(), '# tracked\n')
 
 
 if __name__ == '__main__':

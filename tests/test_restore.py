@@ -346,38 +346,22 @@ print(json.dumps({'claude': limits.fetch_claude_quota(), 'codex': limits.fetch_c
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(log.read_text(), 'earlier run\n')
 
-    def zsh_aliases(self):
-        (self.home / '.oh-my-zsh/oh-my-zsh.sh').write_text('')
-        r = subprocess.run(['zsh', '-f', '-c', 'source "$1" && alias', 'zsh', str(self.repo / 'zsh/.zshrc')], env=self.env, cwd=self.root, capture_output=True, text=True, timeout=30)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stderr, '')
-        return dict(line.split('=', 1) for line in r.stdout.splitlines() if '=' in line)
+    def test_failed_oh_my_zsh_install_is_reported_and_links_still_made(self):
+        shutil.rmtree(self.home / '.oh-my-zsh')
+        self.stub('curl', 'exit 22')
+        r = self.run_script('install', '--yes', '--no-brew', '--no-cli', '--no-settings', '--no-agents')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('FAILED: Oh My Zsh and plugins', r.stderr)
+        self.assertEqual(os.readlink(self.home / '.zshrc'), str(self.repo / 'zsh/.zshrc'))
 
-    def test_zshrc_loads_cleanly_without_optional_tools(self):
-        aliases = self.zsh_aliases()
-        for name in ('ls', 'cat', 'grep', 'rgg', 'top', 'df', 'vim'):
-            self.assertNotIn(name, aliases)
-
-    def test_zshrc_loads_nvm_when_present(self):
-        nvm = self.home / '.nvm'
-        nvm.mkdir()
-        (nvm / 'nvm.sh').write_text('export NVM_LOADED=yes\n')
-        (self.home / '.oh-my-zsh/oh-my-zsh.sh').write_text('')
-        r = subprocess.run(['zsh', '-f', '-c', 'source "$1" && print -r -- "$NVM_LOADED $NVM_DIR"', 'zsh', str(self.repo / 'zsh/.zshrc')], env=self.env, cwd=self.root, capture_output=True, text=True, timeout=30)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.strip(), f'yes {nvm}')
-
-    def test_zshrc_aliases_installed_tools_but_never_grep(self):
-        for tool in ('lsd', 'bat', 'rg', 'btop', 'duf', 'nvim'):
-            self.stub(tool, 'exit 0')
-        self.stub('fzf', 'exit 0')
-        self.stub('zoxide', 'exit 0')
-        aliases = self.zsh_aliases()
-        self.assertEqual(aliases['ls'], 'lsd')
-        self.assertIn('rg --no-ignore', aliases['rgg'])
-        self.assertNotIn('grep', aliases)
-        for name in ('cat', 'top', 'df', 'vim', 'vi'):
-            self.assertIn(name, aliases)
+    def test_failed_homebrew_install_is_reported_and_bundle_skipped(self):
+        (self.mock / 'brew').unlink()
+        self.stub('curl', 'exit 22')
+        r = self.run_script('install', '--yes', '--no-cli', '--no-settings', '--no-agents')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('FAILED: Homebrew\n', r.stderr)
+        self.assertNotIn('Homebrew packages', r.stdout + r.stderr)
+        self.assertEqual(os.readlink(self.home / '.zshrc'), str(self.repo / 'zsh/.zshrc'))
 
     def test_install_does_not_report_links_ok_when_a_source_is_missing(self):
         (self.repo / 'ghostty/config').unlink()

@@ -188,6 +188,16 @@ exit 0
         self.assertIn('bundle --file=', self.log.read_text())
         self.assertIn('Brewfile.linux', self.log.read_text())
 
+    def test_failed_homebrew_install_suggests_passwd_and_continues(self):
+        (self.mock / 'brew').unlink()
+        self.stub('curl', 'exit 22')
+        r = self.install('--no-cli')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('FAILED: Homebrew\n', r.stderr)
+        self.assertIn('passwd', r.stderr)
+        self.assertNotIn('Homebrew packages', r.stdout + r.stderr)
+        self.assertEqual(os.readlink(self.home / '.zshrc'), str(self.repo / 'zsh/.zshrc'))
+
     def test_unknown_argument_is_rejected(self):
         r = self.install('--bogus')
         self.assertEqual(r.returncode, 2)

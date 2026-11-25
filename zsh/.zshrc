@@ -106,9 +106,38 @@ unset _sdk
 
 #nvm, where node (and npm-installed CLIs such as claude and codex) comes from
 #nvm instead of Homebrew, e.g. on SteamOS. guarded: a no-op without nvm.
+#--no-use skips nvm's own startup lookup, which costs every new shell a few
+#hundred ms; the default version's bin goes on PATH directly instead. aliases
+#nvm can't resolve this way (system, iojs, ...) still fall back to nvm itself.
 if [ -s "$HOME/.nvm/nvm.sh" ]; then
     export NVM_DIR="$HOME/.nvm"
-    source "$NVM_DIR/nvm.sh"
+    source "$NVM_DIR/nvm.sh" --no-use
+    _v=default
+    for _i in 1 2 3 4 5; do  #follow chains like default -> lts/* -> lts/jod -> v22.x
+        [ -f "$NVM_DIR/alias/$_v" ] || break
+        _v=$(<"$NVM_DIR/alias/$_v")
+    done
+    _v=${_v#v}
+    if [[ $_v == (node|stable) ]]; then
+        _node=($NVM_DIR/versions/node/v*(N/nOn[1]))
+    elif [[ $_v == <->(|.<->(|.<->)) ]]; then
+        _node=($NVM_DIR/versions/node/v${_v}(|.*)(N/nOn[1]))
+    else
+        _node=()
+    fi
+    if (( $#_node )); then
+        export NVM_BIN="$_node[1]/bin" NVM_INC="$_node[1]/include/node"
+        path=("$NVM_BIN" $path)
+    elif [ -f "$NVM_DIR/alias/default" ]; then
+        nvm use --silent default >/dev/null 2>&1
+    fi
+    unset _v _i _node
+fi
+
+#clipboard on Linux: pbcopy/pbpaste as on macOS, via wl-clipboard (Wayland only)
+if ! (( $+commands[pbcopy] )) && (( $+commands[wl-copy] )) && [[ -n $WAYLAND_DISPLAY ]]; then
+    alias pbcopy='wl-copy'
+    alias pbpaste='wl-paste --no-newline'
 fi
 
 #fzf: ctrl-r history search, ctrl-t files, alt-c cd

@@ -37,17 +37,20 @@ install_agy() {
   fi
   echo "==> Installing agy..."
   mkdir -p "$fake_home" "$HOME/.local/bin"
-  if curl -fsSL https://antigravity.google/cli/install.sh -o "$WORK_DIR/agy.sh" &&
-     HOME="$fake_home" bash "$WORK_DIR/agy.sh" &&
-     [ -x "$fake_home/.local/bin/agy" ] &&
-     cp "$fake_home/.local/bin/agy" "$HOME/.local/bin/agy" &&
-     "$HOME/.local/bin/agy" install --skip-aliases --skip-path; then
-    if ! command -v agy >/dev/null 2>&1; then
-      echo "Installer completed but agy is missing from PATH." >&2
-      FAILED=1
-    fi
-  else
+  if ! { curl -fsSL https://antigravity.google/cli/install.sh -o "$WORK_DIR/agy.sh" &&
+         HOME="$fake_home" bash "$WORK_DIR/agy.sh" &&
+         [ -x "$fake_home/.local/bin/agy" ] &&
+         cp "$fake_home/.local/bin/agy" "$HOME/.local/bin/agy"; }; then
     echo "Installation failed: agy" >&2
+    FAILED=1
+  elif ! "$HOME/.local/bin/agy" install --skip-aliases --skip-path; then
+    # Take the binary away again: otherwise the next run would find agy,
+    # report "already installed" and never finish its setup.
+    rm -f "$HOME/.local/bin/agy"
+    echo "Installation failed: agy (setup step 'agy install'); re-run to retry." >&2
+    FAILED=1
+  elif ! command -v agy >/dev/null 2>&1; then
+    echo "Installer completed but agy is missing from PATH." >&2
     FAILED=1
   fi
 }

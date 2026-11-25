@@ -81,6 +81,8 @@ which sets up the portable half of the repo and leaves the macOS-only parts
   system package manager. Everything lives under `/home` (`/home/linuxbrew` and
   your home directory), so SteamOS updates, which replace `/usr`, do not touch it.
   Installing Homebrew asks for `sudo` once, to create `/home/linuxbrew`.
+  On SteamOS the `deck` user has no password by default, so run `passwd`
+  first; otherwise the Homebrew step fails (the rest of the setup still runs).
 - zsh, oh-my-zsh and the same `.zshrc` / `.zprofile`; `.zprofile` finds the
   Linux Homebrew prefix. Homebrew is also added to `~/.bashrc`, because SteamOS
   and Konsole start bash by default. The login shell is left alone; the report
@@ -120,7 +122,7 @@ dotfiles/
 ├── install.sh                # Idempotent bootstrap (hands over to install-linux.sh on Linux)
 ├── install-linux.sh          # Linux bootstrap
 ├── zsh/
-│   ├── .zshrc                # Aliases (only for installed tools), history, fzf, zoxide, extract()
+│   ├── .zshrc                # Aliases (only for installed tools), history, fzf, zoxide, nvm, extract()
 │   └── .zprofile             # PATH and Homebrew init
 ├── git/
 │   ├── .gitconfig            # Shared settings, included by ~/.gitconfig
@@ -146,7 +148,9 @@ dotfiles/
 │   ├── install-cli           # Native installers + npm Codex installation
 │   ├── mac-settings          # Export/apply macOS preferences
 │   ├── mac-backup            # Encrypted private configuration backup
-│   └── limits                # Agent quota dashboard (Python standard library)
+│   ├── limits                # Agent quota dashboard (Python standard library)
+│   └── lib/                  # Shared shell code: install-common.sh (both installers),
+│                             #   maintenance.sh (mac-update, mac-cleanup)
 └── launchd/                  # Agent templates for the two scripts
 ```
 
