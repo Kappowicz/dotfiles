@@ -15,6 +15,11 @@ set -euo pipefail
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ "$(uname -s)" = Linux ]; then exec "${DOTFILES_DIR}/install-linux.sh" "$@"; fi
 BACKUP_SUFFIX=".backup-$(date +%Y%m%d%H%M%S)"
+# Apple Silicon first, then Intel.
+BREW_CANDIDATES=(/opt/homebrew/bin/brew /usr/local/bin/brew)
+FINISH_MESSAGE="Setup complete. Restart your terminal; see RECOVERY.md for manual steps."
+# shellcheck source=bin/lib/install-common.sh
+source "${DOTFILES_DIR}/bin/lib/install-common.sh"
 ASSUME_YES=0
 SKIP_BREW=0
 SKIP_CLI=0
@@ -63,71 +68,19 @@ if ! xcode-select -p >/dev/null 2>&1; then
     echo "Install Command Line Tools first: xcode-select --install" >&2
     exit 1
 fi
-FAILED_STEPS=()
-COMPLETED_STEPS=()
-finish() {
-    local status=$?
-    trap - EXIT
-    echo
-    echo "Installation report:"
-    if [ "${#COMPLETED_STEPS[@]}" -gt 0 ]; then printf '  OK: %s\n' "${COMPLETED_STEPS[@]}"; fi
-    if [ "${#FAILED_STEPS[@]}" -gt 0 ]; then
-        printf '  FAILED: %s\n' "${FAILED_STEPS[@]}" >&2
-        status=1
-    fi
-    if [ "$status" -ne 0 ]; then
-        echo "Setup incomplete. Fix the errors above and re-run install.sh." >&2
-    else
-        echo "Setup complete. Restart your terminal; see RECOVERY.md for manual steps."
-    fi
-    exit "$status"
-}
 trap finish EXIT
-# For groups of link_file calls, which record a missing source themselves:
-# report the group as OK only if none was recorded since <failures before>.
-group_done() { # group_done <name> <failures before>
-    if [ "${#FAILED_STEPS[@]}" -eq "$2" ]; then COMPLETED_STEPS+=("$1"); fi
-}
-run_step() {
-    local name="$1"
-    shift
-    if "$@"; then
-        COMPLETED_STEPS+=("$name")
-    else
-        FAILED_STEPS+=("$name")
-        echo "!! Failed: $name" >&2
-    fi
-}
 
 # ------------------------------------------------------------------------------
 # 1. Homebrew and packages
 # ------------------------------------------------------------------------------
 # Resolve an existing installation before deciding that Homebrew is missing.
-if [ -x /opt/homebrew/bin/brew ]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
-elif [ -x /usr/local/bin/brew ]; then
-    eval "$(/usr/local/bin/brew shellenv)"
-fi
-if [ "$SKIP_BREW" -eq 0 ] && ! command -v brew >/dev/null 2>&1; then
-    echo "==> Homebrew not found. Installing..."
-    BREW_INSTALLER=$(mktemp)
-    curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh -o "$BREW_INSTALLER"
-    if [ "$ASSUME_YES" -eq 1 ]; then
-        NONINTERACTIVE=1 /bin/bash "$BREW_INSTALLER"
-    else
-        /bin/bash "$BREW_INSTALLER"
+load_brew || true
+if [ "$SKIP_BREW" -eq 0 ]; then
+    if ! command -v brew >/dev/null 2>&1; then run_step "Homebrew" install_homebrew; fi
+    if command -v brew >/dev/null 2>&1 && [ -f "${DOTFILES_DIR}/Brewfile" ]; then
+        echo "==> Installing packages and applications from Brewfile (this takes a while)..."
+        run_step "Homebrew packages" brew bundle --file="${DOTFILES_DIR}/Brewfile"
     fi
-    rm -f "$BREW_INSTALLER"
-fi
-if [ -x /opt/homebrew/bin/brew ]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
-elif [ -x /usr/local/bin/brew ]; then
-    eval "$(/usr/local/bin/brew shellenv)"
-fi
-
-if [ "$SKIP_BREW" -eq 0 ] && [ -f "${DOTFILES_DIR}/Brewfile" ]; then
-    echo "==> Installing packages and applications from Brewfile (this takes a while)..."
-    run_step "Homebrew packages" brew bundle --file="${DOTFILES_DIR}/Brewfile"
 fi
 
 export PATH="$HOME/.local/bin:$PATH"
@@ -136,24 +89,7 @@ if [ "$SKIP_CLI" -eq 0 ]; then run_step "Agent CLIs" "${DOTFILES_DIR}/bin/instal
 # ------------------------------------------------------------------------------
 # 2. oh-my-zsh and the plugins .zshrc expects
 # ------------------------------------------------------------------------------
-# Without these, every new shell errors out on the `source $ZSH/oh-my-zsh.sh`
-# line in zsh/.zshrc.
-ZSH_DIR="$HOME/.oh-my-zsh"
-if [ ! -d "$ZSH_DIR" ]; then
-    echo "==> Installing oh-my-zsh..."
-    OMZ_INSTALLER=$(mktemp)
-    curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o "$OMZ_INSTALLER"
-    ZSH="$ZSH_DIR" RUNZSH=no KEEP_ZSHRC=yes CHSH=no sh "$OMZ_INSTALLER"
-    rm -f "$OMZ_INSTALLER"
-fi
-for plugin in zsh-autosuggestions zsh-syntax-highlighting; do
-    target="${ZSH_DIR}/custom/plugins/${plugin}"
-    if [ ! -d "$target" ]; then
-        echo "==> Installing ${plugin}..."
-        git clone --depth=1 "https://github.com/zsh-users/${plugin}.git" "$target"
-    fi
-done
-COMPLETED_STEPS+=("Oh My Zsh and plugins")
+run_step "Oh My Zsh and plugins" install_oh_my_zsh
 
 # ------------------------------------------------------------------------------
 # 3. Target directories
@@ -171,55 +107,12 @@ mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
 # ------------------------------------------------------------------------------
 # 4. Machine-specific files, generated from templates (never tracked in git)
 # ------------------------------------------------------------------------------
-# ~/.gitconfig is a real file, not a symlink: `git config --global` writes to
-# that path, and a symlink would point those writes straight into the repo.
-if [ ! -f "$HOME/.gitconfig" ] || [ -L "$HOME/.gitconfig" ]; then
-    if [ -L "$HOME/.gitconfig" ]; then
-        echo "   replacing the old ~/.gitconfig symlink with a real file"
-        mv "$HOME/.gitconfig" "$HOME/.gitconfig${BACKUP_SUFFIX}"
-    fi
-    cp "${DOTFILES_DIR}/git/gitconfig.example" "$HOME/.gitconfig"
-    git config --file "$HOME/.gitconfig" --replace-all include.path "${DOTFILES_DIR}/git/.gitconfig"
-    echo "==> Created ~/.gitconfig — EDIT IT, it still says 'Your Name'."
-    NEEDS_IDENTITY=1
-fi
-if ! git config --file "$HOME/.gitconfig" --get-all include.path | grep -Fxq -- "${DOTFILES_DIR}/git/.gitconfig"; then
-    cp -p "$HOME/.gitconfig" "$HOME/.gitconfig${BACKUP_SUFFIX}"
-    git config --file "$HOME/.gitconfig" --add include.path "${DOTFILES_DIR}/git/.gitconfig"
-fi
-if [ ! -f "${DOTFILES_DIR}/ssh/config" ]; then
-    if [ -f "$HOME/.ssh/config" ] && [ ! -L "$HOME/.ssh/config" ]; then
-        cp "$HOME/.ssh/config" "${DOTFILES_DIR}/ssh/config"
-        echo "==> Preserved existing SSH configuration in ssh/config (gitignored)."
-    else
-        cp "${DOTFILES_DIR}/ssh/config.example" "${DOTFILES_DIR}/ssh/config"
-        echo "==> Created ssh/config from the template — edit it for your own hosts."
-    fi
-fi
+setup_gitconfig
+setup_ssh_config
 
 # ------------------------------------------------------------------------------
 # 5. Symlinks
 # ------------------------------------------------------------------------------
-link_file() {
-    local src="$1" dst="$2"
-
-    if [ ! -e "$src" ]; then
-        echo "!! Source missing: $src" >&2
-        FAILED_STEPS+=("Missing source: $src")
-        return 0
-    fi
-    if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then
-        echo "   already linked: $dst"
-        return
-    fi
-    if [ -e "$dst" ] || [ -L "$dst" ]; then
-        echo "   backing up: $dst -> ${dst}${BACKUP_SUFFIX}"
-        mv "$dst" "${dst}${BACKUP_SUFFIX}"
-    fi
-    echo "   linking: $dst"
-    ln -s "$src" "$dst"
-}
-
 echo "==> Linking configuration files..."
 FAILURES_BEFORE=${#FAILED_STEPS[@]}
 link_file "${DOTFILES_DIR}/zsh/.zshrc"                    "$HOME/.zshrc"
@@ -239,33 +132,8 @@ for script in mac-update mac-cleanup mac-settings mac-backup limits; do
     link_file "${DOTFILES_DIR}/bin/$script" "$HOME/.local/bin/$script"
 done
 group_done "Configuration links and Git include" "$FAILURES_BEFORE"
-FAILURES_BEFORE=${#FAILED_STEPS[@]}
 
-# Mutable app configs are real files: tools can save private/machine-specific
-# settings without putting those writes into the tracked repository.
-copy_config() {
-    local src="$1" dst="$2"
-    mkdir -p "$(dirname "$dst")"
-    if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then cp "$src" "$dst"; fi
-}
-copy_config "${DOTFILES_DIR}/codex/config.toml" "$HOME/.codex/config.toml"
-copy_config "${DOTFILES_DIR}/claude/settings.json" "$HOME/.claude/settings.json"
-mkdir -p "$HOME/.claude/hooks" "$HOME/.gemini/antigravity-cli"
-link_file "${DOTFILES_DIR}/claude/statusline.sh" "$HOME/.claude/statusline.sh"
-link_file "${DOTFILES_DIR}/claude/hooks/skill-statusline.sh" "$HOME/.claude/hooks/skill-statusline.sh"
-# Extra Antigravity profiles (agy2/agy3) each need their own sign-in, so they
-# are set up only when already present, never created. Sign in with `agy2` /
-# `agy3` first, then re-run install.sh to add their status line.
-agy_profiles=("$HOME")
-for extra in "$HOME/.agy-profile2" "$HOME/.agy-profile3"; do
-    if [ -d "$extra" ]; then agy_profiles+=("$extra"); fi
-done
-for profile_home in "${agy_profiles[@]}"; do
-    copy_config "${DOTFILES_DIR}/antigravity/settings.json" "$profile_home/.gemini/antigravity-cli/settings.json"
-    mkdir -p "$profile_home/.gemini/antigravity-cli"
-    link_file "${DOTFILES_DIR}/antigravity/statusline.py" "$profile_home/.gemini/antigravity-cli/statusline.py"
-done
-group_done "Agent settings and status lines (existing settings preserved)" "$FAILURES_BEFORE"
+setup_agent_configs
 if [ "$SKIP_SETTINGS" -eq 0 ]; then
     run_step "macOS preferences" "${DOTFILES_DIR}/bin/mac-settings" apply
 fi

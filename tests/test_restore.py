@@ -367,6 +367,74 @@ print(json.dumps({'claude': limits.fetch_claude_quota(), 'codex': limits.fetch_c
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), f'yes {nvm}')
 
+    def run_zshrc(self, command, path=None, **variables):
+        (self.home / '.oh-my-zsh/oh-my-zsh.sh').write_text('')
+        env = dict(self.env, **variables)
+        if path is not None:
+            env['PATH'] = path
+        zsh = shutil.which('zsh')
+        r = subprocess.run([zsh, '-f', '-c', f'source "$1" && {command}', 'zsh', str(self.repo / 'zsh/.zshrc')], env=env, cwd=self.root, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr, '')
+        return r.stdout
+
+    def make_nvm(self, versions, aliases):
+        nvm = self.home / '.nvm'
+        nvm.mkdir()
+        # A stand-in nvm: records whether the slow path was taken.
+        (nvm / 'nvm.sh').write_text('nvm() { print -r -- "nvm $*" >> "$MOCK_LOG"; }\n')
+        for v in versions:
+            (nvm / 'versions/node' / v / 'bin').mkdir(parents=True)
+        for name, target in aliases.items():
+            (nvm / 'alias' / name).parent.mkdir(parents=True, exist_ok=True)
+            (nvm / 'alias' / name).write_text(target + '\n')
+        self.log.write_text('')
+        return nvm
+
+    def test_zshrc_puts_newest_matching_nvm_default_on_path_without_nvm_use(self):
+        nvm = self.make_nvm(['v2.1.0', 'v20.9.0', 'v20.11.1', 'v22.3.0'], {'default': '20'})
+        out = self.run_zshrc('print -r -- "$path[1]"')
+        self.assertEqual(out.strip(), str(nvm / 'versions/node/v20.11.1/bin'))
+        self.assertEqual(self.log.read_text(), '')
+
+    def test_zshrc_follows_nvm_lts_alias_chain(self):
+        nvm = self.make_nvm(['v20.11.1', 'v22.3.0'], {'default': 'lts/*', 'lts/*': 'lts/iron', 'lts/iron': 'v20.11.1'})
+        out = self.run_zshrc('print -r -- "$path[1] $NVM_BIN"')
+        bin_dir = str(nvm / 'versions/node/v20.11.1/bin')
+        self.assertEqual(out.strip(), f'{bin_dir} {bin_dir}')
+
+    def test_zshrc_falls_back_to_nvm_for_unresolvable_default(self):
+        self.make_nvm(['v22.3.0'], {'default': 'system'})
+        self.run_zshrc('true')
+        self.assertEqual(self.log.read_text(), 'nvm use --silent default\n')
+
+    def test_zshrc_maps_pbcopy_to_wl_clipboard_only_on_wayland(self):
+        self.stub('wl-copy', 'exit 0')
+        self.stub('wl-paste', 'exit 0')
+        # Only the mocks on PATH: macOS's own /usr/bin/pbcopy must not count.
+        out = self.run_zshrc('alias pbcopy pbpaste || true', path=str(self.mock), WAYLAND_DISPLAY='wayland-0')
+        self.assertIn('pbcopy=wl-copy', out)
+        self.assertIn("pbpaste='wl-paste --no-newline'", out)
+        out = self.run_zshrc('alias pbcopy || true', path=str(self.mock), WAYLAND_DISPLAY='')
+        self.assertEqual(out, '')
+
+    def test_failed_oh_my_zsh_install_is_reported_and_links_still_made(self):
+        shutil.rmtree(self.home / '.oh-my-zsh')
+        self.stub('curl', 'exit 22')
+        r = self.run_script('install', '--yes', '--no-brew', '--no-cli', '--no-settings', '--no-agents')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('FAILED: Oh My Zsh and plugins', r.stderr)
+        self.assertEqual(os.readlink(self.home / '.zshrc'), str(self.repo / 'zsh/.zshrc'))
+
+    def test_failed_homebrew_install_is_reported_and_bundle_skipped(self):
+        (self.mock / 'brew').unlink()
+        self.stub('curl', 'exit 22')
+        r = self.run_script('install', '--yes', '--no-cli', '--no-settings', '--no-agents')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('FAILED: Homebrew\n', r.stderr)
+        self.assertNotIn('Homebrew packages', r.stdout + r.stderr)
+        self.assertEqual(os.readlink(self.home / '.zshrc'), str(self.repo / 'zsh/.zshrc'))
+
     def test_zshrc_aliases_installed_tools_but_never_grep(self):
         for tool in ('lsd', 'bat', 'rg', 'btop', 'duf', 'nvim'):
             self.stub(tool, 'exit 0')

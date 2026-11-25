@@ -16,12 +16,12 @@ jobs:
         run: brew install shellcheck age
       - name: shellcheck
         run: |
-          shellcheck -x install.sh install-linux.sh bin/mac-update bin/mac-cleanup bin/install-cli \
+          shellcheck -x install.sh install-linux.sh bin/lib/install-common.sh bin/mac-update bin/mac-cleanup bin/install-cli \
               bin/mac-backup bin/lib/maintenance.sh claude/statusline.sh \
               claude/hooks/skill-statusline.sh
       - name: Syntax
         run: |
-          bash -n install.sh install-linux.sh bin/mac-update bin/mac-cleanup bin/install-cli \
+          bash -n install.sh install-linux.sh bin/lib/install-common.sh bin/mac-update bin/mac-cleanup bin/install-cli \
               bin/mac-backup claude/statusline.sh claude/hooks/skill-statusline.sh
           zsh -n zsh/.zshrc zsh/.zprofile
           plutil -lint launchd/*.plist
@@ -36,10 +36,10 @@ jobs:
       - name: Install linters
         run: sudo apt-get update && sudo apt-get install -y shellcheck zsh
       - name: shellcheck
-        run: shellcheck -x install.sh install-linux.sh bin/install-cli
+        run: shellcheck -x install.sh install-linux.sh bin/lib/install-common.sh bin/install-cli
       - name: Syntax
         run: |
-          bash -n install.sh install-linux.sh bin/install-cli
+          bash -n install.sh install-linux.sh bin/lib/install-common.sh bin/install-cli
           zsh -n zsh/.zshrc zsh/.zprofile
       - name: Linux installer tests
         run: python3 -m unittest tests/test_linux.py tests/test_install_cli.py -v
